@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "declaration": false,
+    "types": ["node"],
+    "paths": { "embedded-postgres": ["./node_modules/embedded-postgres/dist/index.d.ts"] }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

@@ -1,0 +1,33 @@
+# Private-network-first. {$SITE_ADDRESS} examples:
+#   ca.home.arpa            -> Caddy's internal CA issues the certificate (trust its root on your devices)
+#   accounting.example.com  -> public ACME certificate (only if you deliberately expose it; prefer a VPN)
+{$SITE_ADDRESS:localhost} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		# Next.js emits small inline bootstrap scripts, so script-src needs 'unsafe-inline'; everything else is locked to this origin.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		-Server
+	}
+	# The API is reached on the same origin under /api (first-party cookie, no CORS). Caddy talks to it directly so the API
+	# sees the real client address in X-Forwarded-For (rate limits, lockout and the audit log depend on it).
+	# Upstream idle connections are dropped after 30 s, well before the api/web servers close theirs (65 s): no reset races.
+	handle_path /api/* {
+		reverse_proxy api:4000 {
+			transport http {
+				keepalive 30s
+			}
+		}
+	}
+	handle {
+		reverse_proxy web:3000 {
+			transport http {
+				keepalive 30s
+			}
+		}
+	}
+}

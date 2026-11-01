@@ -1,0 +1,26 @@
+{
+  "name": "@ca/worker",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json && node --watch dist/main.js",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo 'worker has no tests yet (no jobs until Milestone 3)'"
+  },
+  "dependencies": {
+    "@ca/database": "workspace:*",
+    "bullmq": "^5.58.0",
+    "ioredis": "^5.7.0",
+    "@ca/api": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  },
+  "files": [
+    "dist"
+  ]
+}

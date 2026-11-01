@@ -1,0 +1,234 @@
+# Production stack, sized for a UGREEN DXP2800 (Intel N100, 8 GB RAM) running UGOS Pro; works on any linux/amd64 Docker host.
+# Images come from GHCR (built by GitHub Actions); nothing is built on the NAS.
+#
+# Networks
+#   internal  no route anywhere: PostgreSQL and Redis live only here.
+#   egress    outbound internet only (no published ports): api and worker call Shopify and the bank-feed provider.
+#   edge      Caddy, the only service that publishes ports (HTTPS for your LAN / VPN).
+#
+# Memory budget (container limits, about 3.3 GB in total) leaves 4.5+ GB of the 8 GB for UGOS, its apps and the page cache.
+# See docs/dxp2800.md before changing any limit; System administration -> Resources shows actual use.
+name: canadian-accounting
+x-common: &common
+  restart: unless-stopped
+  stop_grace_period: 30s
+  init: true # reaps zombie processes and forwards signals (clean shutdowns)
+  logging:
+    driver: json-file
+    options: { max-size: '10m', max-file: '3' }
+  security_opt: ['no-new-privileges:true']
+# Our own containers (api, worker, web, backup) run with no Linux capabilities and a read-only root filesystem.
+# (postgres, redis and caddy keep their defaults: they need to chown/bind and write to their data folders.)
+x-hardened: &hardened
+  cap_drop: ['ALL']
+  read_only: true
+  tmpfs: ['/tmp']
+x-db-url: &dburl postgresql://${POSTGRES_USER:-ca_admin}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:-canadian_accounting}?schema=public
+x-server-image: &server ghcr.io/${GITHUB_REPOSITORY:?e.g. youruser/canadian-accounting}/server:${APP_VERSION:?required}
+x-app-env: &appenv
+  NODE_ENV: production
+  APP_VERSION: ${APP_VERSION}
+  REDIS_URL: redis://redis:6379
+  WEB_ORIGIN: ${WEB_ORIGIN:-https://${SITE_ADDRESS:?required}}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?required}
+  DOCUMENTS_DIR: /documents
+  BACKUP_DIR: /backups
+  MONITOR_PATHS: /documents,/backups
+  SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-}
+  SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-}
+  SHOPIFY_REQUEST_ALL_ORDERS: ${SHOPIFY_REQUEST_ALL_ORDERS:-false}
+  SHOPIFY_WEBHOOK_BASE_URL: ${SHOPIFY_WEBHOOK_BASE_URL:-}
+  PLAID_CLIENT_ID: ${PLAID_CLIENT_ID:-}
+  PLAID_SECRET: ${PLAID_SECRET:-}
+  PLAID_ENV: ${PLAID_ENV:-production}
+  PLAID_REDIRECT_URI: ${PLAID_REDIRECT_URI:-}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+  SYNC_MAX_BACKLOG: ${SYNC_MAX_BACKLOG:-20}
+  BANK_MAX_PAGES_PER_RUN: ${BANK_MAX_PAGES_PER_RUN:-40}
+
+services:
+  postgres:
+    <<: *common
+    image: postgres:17-alpine
+    # Tuned for 1 GB inside an 8 GB NAS: modest buffers, few connections (api 8 + worker 4 + backup + admin).
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=40
+      - -c
+      - wal_buffers=8MB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - random_page_cost=1.5
+      - -c
+      - max_worker_processes=4
+      - -c
+      - max_parallel_workers_per_gather=1
+    shm_size: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ca_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:-canadian_accounting}
+    volumes: ['${DATA_DIR:?required}/postgres:/var/lib/postgresql/data']
+    networks: [internal]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy: { resources: { limits: { memory: 1g, cpus: '2.0' } } }
+
+  redis:
+    <<: *common
+    image: redis:7-alpine
+    # noeviction: when full, Redis refuses new jobs (visible as errors) instead of silently dropping queued ones.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory', '128mb', '--maxmemory-policy', 'noeviction', '--save', '']
+    volumes: ['${DATA_DIR}/redis:/data']
+    networks: [internal]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    deploy: { resources: { limits: { memory: 192m } } }
+
+  # One-shot: the app runs as uid 1000 with no capabilities, so the NAS folders it writes must belong to uid 1000.
+  # Folders made in UGOS File Manager belong to your NAS user; this fixes that on every start (only what is wrong is changed).
+  prepare:
+    image: ghcr.io/${GITHUB_REPOSITORY}/backup:${APP_VERSION}
+    entrypoint: ['/bin/sh', '-c', 'find /documents /backups ! -user 1000 -exec chown 1000:1000 {} + && chmod 700 /documents /backups && echo folders ready']
+    user: '0:0'
+    cap_drop: ['ALL']
+    cap_add: ['CHOWN', 'FOWNER', 'DAC_READ_SEARCH']
+    read_only: true
+    network_mode: none
+    volumes:
+      - '${DATA_DIR}/documents:/documents'
+      - '${DATA_DIR}/backups:/backups'
+    restart: 'no'
+
+  migrate:
+    image: *server
+    # Prisma CLI bundled in the server image; runs once per start and exits.
+    command: ['node', 'node_modules/prisma/build/index.js', 'migrate', 'deploy', '--schema', 'node_modules/@ca/database/prisma/schema.prisma']
+    environment:
+      DATABASE_URL: *dburl
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [internal]
+    restart: 'no'
+    read_only: true
+    tmpfs: ['/tmp']
+    deploy: { resources: { limits: { memory: 256m } } }
+
+  api:
+    <<: [*common, *hardened]
+    image: *server
+    environment:
+      <<: *appenv
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ca_admin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-canadian_accounting}?schema=public&connection_limit=8&pool_timeout=20
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      NODE_OPTIONS: --max-old-space-size=320
+    volumes:
+      - '${DATA_DIR}/documents:/documents'
+      - '${DATA_DIR}/backups:/backups:ro' # read-only: backup status and free space
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    networks: [internal, egress]
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy: { resources: { limits: { memory: 512m, cpus: '2.0' } } }
+
+  worker:
+    <<: [*common, *hardened]
+    image: *server
+    command: ['node', 'dist/main.js']
+    environment:
+      <<: *appenv
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ca_admin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-canadian_accounting}?schema=public&connection_limit=4&pool_timeout=30
+      NODE_OPTIONS: --max-old-space-size=320
+      WORKER_MEMORY_PAUSE_PCT: '85'
+    volumes:
+      - '${DATA_DIR}/documents:/documents'
+      - '${DATA_DIR}/backups:/backups:ro'
+    depends_on:
+      prepare: { condition: service_completed_successfully }
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    networks: [internal, egress]
+    deploy: { resources: { limits: { memory: 512m, cpus: '1.5' } } }
+
+  web:
+    <<: [*common, *hardened]
+    image: ghcr.io/${GITHUB_REPOSITORY}/web:${APP_VERSION}
+    environment:
+      NODE_OPTIONS: --max-old-space-size=160
+      KEEP_ALIVE_TIMEOUT: '65000' # longer than Caddy's 30 s upstream keep-alive (Next.js standalone reads this)
+    depends_on: { api: { condition: service_healthy } }
+    networks: [internal]
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy: { resources: { limits: { memory: 256m, cpus: '1.0' } } }
+
+  caddy:
+    <<: *common
+    image: caddy:2-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    ports:
+      - '${HTTPS_PORT:-443}:443'
+      - '${HTTP_PORT:-80}:80'
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - '${DATA_DIR}/caddy/data:/data'
+      - '${DATA_DIR}/caddy/config:/config'
+    depends_on: [web, api]
+    networks: [internal, edge]
+    deploy: { resources: { limits: { memory: 128m } } }
+
+  backup:
+    <<: [*common, *hardened]
+    image: ghcr.io/${GITHUB_REPOSITORY}/backup:${APP_VERSION}
+    user: '1000:1000' # same owner as the documents it archives and restores
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-ca_admin}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-canadian_accounting}
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?required}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      DOCUMENTS_DIR: /documents
+    volumes:
+      - '${DATA_DIR}/backups:/backups'
+      - '${DATA_DIR}/documents:/documents' # read-write only so a restore can put files back
+    depends_on:
+      postgres: { condition: service_healthy }
+      prepare: { condition: service_completed_successfully }
+    networks: [internal]
+    deploy: { resources: { limits: { memory: 256m, cpus: '1.0' } } }
+
+networks:
+  internal:
+    internal: true # no route to the internet or the LAN
+  egress: {} # outbound only: nothing on it publishes a port
+  edge: {}

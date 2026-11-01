@@ -1,0 +1,72 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions: { contents: read }
+concurrency: { group: 'ci-${{ github.ref }}', cancel-in-progress: true }
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: node scripts/check-migrations.mjs # rollback safety: see docs/dxp2800.md
+      - run: pnpm typecheck
+      # Unit tests plus API integration tests (embedded PostgreSQL), including the generated security tests:
+      # route inventory, tenant isolation, role matrix, CSRF, session handling.
+      - run: pnpm test
+      # Fails on any advisory not triaged in package.json "pnpm.auditConfig.ignoreGhsas" (reasons: docs/security.md).
+      - run: pnpm audit --prod --audit-level=moderate
+
+  images:
+    # Proves the production images still build and the compose file is valid. Nothing is pushed from CI; releases push (release.yml).
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix: { target: [server, web, backup] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: false
+          tags: ca-${{ matrix.target }}:ci
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Production compose file is valid and publishes only Caddy's ports
+        run: |
+          cp .env.production.example .env
+          sed -i -e 's|^GITHUB_REPOSITORY=.*|GITHUB_REPOSITORY=o/r|' -e 's|^APP_VERSION=.*|APP_VERSION=ci|' \
+                 -e 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=x|' -e 's|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=x|' \
+                 -e 's|^BACKUP_PASSPHRASE=.*|BACKUP_PASSPHRASE=x|' -e 's|^SITE_ADDRESS=.*|SITE_ADDRESS=ca.test|' \
+                 -e 's|^DATA_DIR=.*|DATA_DIR=/tmp/ca|' .env
+          docker compose -f compose.production.yaml config > resolved.yaml
+          published=$(docker compose -f compose.production.yaml config --format json | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(sorted(s for s,v in d['services'].items() if v.get('ports'))))")
+          echo "services publishing ports: $published"
+          test "$published" = "caddy"
+      - name: Install script runs non-interactively and writes a complete .env
+        run: |
+          mkdir -p /tmp/inst && cp -r .env.production.example compose.production.yaml scripts infrastructure /tmp/inst/
+          cd /tmp/inst && CA_GITHUB_REPOSITORY=o/r CA_APP_VERSION=1.2.3 CA_SITE_ADDRESS=ca.test CA_HTTPS_PORT=8443 CA_HTTP_PORT=8080 CA_DATA_DIR=/tmp/inst/data sh scripts/install.sh
+          test "$(stat -c %a .env)" = 600
+          grep -q '^WEB_ORIGIN=https://ca.test:8443$' .env
+          ! grep -Eq '^(POSTGRES_PASSWORD|ENCRYPTION_KEY|BACKUP_PASSPHRASE|SETUP_TOKEN)=$' .env
+          docker compose -f compose.production.yaml config -q
+      - name: Shell scripts parse
+        run: for f in infrastructure/backup/*.sh scripts/*.sh; do sh -n "$f"; done

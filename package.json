@@ -1,0 +1,57 @@
+{
+  "name": "canadian-accounting",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.18.3",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:packages": "pnpm --filter @ca/shared --filter @ca/database --filter @ca/canadian-tax --filter @ca/accounting-engine --filter @ca/shopify-integration --filter @ca/banking --filter @ca/reporting build",
+    "build": "pnpm -r build",
+    "dev:api": "pnpm build:packages && pnpm --filter @ca/api dev",
+    "dev:web": "pnpm --filter @ca/web dev",
+    "dev:worker": "pnpm build:packages && pnpm --filter @ca/worker dev",
+    "lint": "eslint .",
+    "typecheck": "pnpm build:packages && pnpm -r typecheck",
+    "test": "pnpm build:packages && pnpm -r test",
+    "db:migrate": "pnpm --filter @ca/database migrate:dev",
+    "db:deploy": "pnpm --filter @ca/database migrate:deploy",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "@swc/core",
+      "@node-rs/argon2",
+      "embedded-postgres",
+      "@embedded-postgres/darwin-arm64",
+      "@embedded-postgres/darwin-x64",
+      "@embedded-postgres/linux-x64",
+      "@embedded-postgres/linux-arm64",
+      "esbuild",
+      "sharp"
+    ],
+    "overrides": {
+      "postcss": ">=8.5.23",
+      "multer": ">=2.5.0",
+      "exceljs>uuid": "^11.1.1"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-ggr8-5vv4-36mx",
+        "GHSA-mrhx-c7xc-m3w5",
+        "GHSA-g3hv-75wg-m249"
+      ]
+    }
+  }
+}

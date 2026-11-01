@@ -1,0 +1,27 @@
+{
+  "name": "@ca/database",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "generate": "prisma generate",
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "typecheck": "prisma generate && tsc -p tsconfig.json --noEmit",
+    "migrate:dev": "dotenv -e ../../.env -c -- prisma migrate dev",
+    "migrate:deploy": "dotenv -e ../../.env -c -- prisma migrate deploy",
+    "test": "echo 'no unit tests in @ca/database; covered by API integration tests'"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "prisma": "^6.19.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "dotenv-cli": "^8.0.0"
+  },
+  "files": [
+    "dist",
+    "prisma"
+  ]
+}

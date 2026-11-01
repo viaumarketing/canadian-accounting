@@ -1,0 +1,25 @@
+{
+  "name": "@ca/reporting",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "pdfkit": "^0.15.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/pdfkit": "^0.13.9",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "files": [
+    "dist"
+  ]
+}
