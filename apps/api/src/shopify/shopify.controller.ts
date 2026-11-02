@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { AppConfig, CONFIG } from '../config';
 import { ZodPipe } from '../common/zod.pipe';
 import { ClientIp, CurrentUser, Public, RequirePermission, SkipCsrf } from '../auth/decorators';
+import { RequireFeature } from '../saas/saas.decorators';
 import { AuthUser } from '../auth/auth.types';
 import { ACCOUNT_KEYS, ShopifyService } from './shopify.service';
 import { ShopifySyncService } from './sync.service';
@@ -19,6 +20,7 @@ const settingsSchema = z.object({
 });
 const classifySchema = z.object({ accountId: uuid });
 
+@RequireFeature('shopify')
 @Controller('companies/:companyId/shopify')
 export class ShopifyController {
   constructor(private readonly shopify: ShopifyService, private readonly sync: ShopifySyncService) {}

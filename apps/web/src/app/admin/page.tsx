@@ -138,6 +138,35 @@ function TopWarnings() {
   return data ? <ResourceWarnings warnings={data.now.warnings} /> : null;
 }
 
+interface Org { id: string; name: string; owner: { email: string; name: string; emailVerifiedAt: string | null }; plan: string; status: string; trialEndsAt: string | null; currentPeriodEnd: string | null; cancelAtPeriodEnd: boolean; subscribed: boolean; writable: boolean; createdAt: string; usage: { companies: number; users: number } }
+
+/** SaaS edition: subscribers and their subscriptions (never their books). */
+function Organizations() {
+  const { data, reload, error } = useApi<Org[]>('/admin/organizations');
+  const [err, setErr] = useState<string | null>(null);
+  if (error) return <Card><EmptyState title="Not a SaaS installation">This server runs the self-hosted edition (APP_MODE=selfhosted), so there are no subscriptions.</EmptyState></Card>;
+  return (
+    <Card><CardHeader><CardTitle>Subscribers ({data?.length ?? 0})</CardTitle></CardHeader><CardContent className="overflow-x-auto">
+      <FormError message={err} />
+      <table className="w-full min-w-[56rem] text-sm">
+        <thead className="text-left text-xs uppercase text-muted-foreground"><tr><th className="py-2">Organization</th><th>Owner</th><th>Plan</th><th>Status</th><th>Trial / period end</th><th>Usage</th><th>Since</th><th /></tr></thead>
+        <tbody>{(data ?? []).map((o) => (
+          <tr key={o.id} className="border-t">
+            <td className="py-2 font-medium">{o.name}</td>
+            <td>{o.owner.name}<span className="block text-xs text-muted-foreground">{o.owner.email}{!o.owner.emailVerifiedAt && ' · unverified'}</span></td>
+            <td>{o.plan}</td>
+            <td><Badge tone={o.writable ? 'success' : 'danger'}>{o.status}</Badge>{o.cancelAtPeriodEnd && <span className="block text-xs text-orange-600">cancelling</span>}</td>
+            <td>{(o.subscribed ? o.currentPeriodEnd : o.trialEndsAt)?.slice(0, 10) ?? '—'}</td>
+            <td>{o.usage.users} users · {o.usage.companies} co.</td>
+            <td>{o.createdAt.slice(0, 10)}</td>
+            <td className="text-right">{!o.subscribed && <Button size="sm" variant="ghost" onClick={() => { setErr(null); void api(`/admin/organizations/${o.id}/extend-trial`, { method: 'POST', body: { days: 14 } }).then(reload).catch((x) => setErr(errorMessage(x))); }}>+14 days trial</Button>}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </CardContent></Card>
+  );
+}
+
 function AdminInner() {
   const { me } = useSession();
   if (!me.isSuperAdmin) return <FormError message="Platform administrators only." />;
@@ -146,8 +175,9 @@ function AdminInner() {
       <h1 className="text-2xl font-semibold tracking-tight">System administration</h1>
       <TopWarnings />
       <Tabs defaultValue="companies">
-        <TabsList><TabsTrigger value="companies">Companies</TabsTrigger><TabsTrigger value="users">Users</TabsTrigger><TabsTrigger value="system">System health</TabsTrigger><TabsTrigger value="resources">Resources</TabsTrigger></TabsList>
+        <TabsList><TabsTrigger value="companies">Companies</TabsTrigger><TabsTrigger value="subscribers">Subscribers</TabsTrigger><TabsTrigger value="users">Users</TabsTrigger><TabsTrigger value="system">System health</TabsTrigger><TabsTrigger value="resources">Resources</TabsTrigger></TabsList>
         <TabsContent value="companies"><Companies /></TabsContent>
+        <TabsContent value="subscribers"><Organizations /></TabsContent>
         <TabsContent value="users"><Users /></TabsContent>
         <TabsContent value="system"><System /></TabsContent>
         <TabsContent value="resources"><Resources /></TabsContent>

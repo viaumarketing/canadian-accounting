@@ -64,6 +64,8 @@ model User {
   failedLoginCount    Int       @default(0)
   lockedUntil         DateTime?
   lastLoginAt         DateTime?
+  /// SaaS sign-up: set when the address is confirmed (self-hosted users are created verified)
+  emailVerifiedAt     DateTime?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
@@ -71,6 +73,9 @@ model User {
   sessions      Session[]
   recoveryCodes RecoveryCode[]
   auditEvents   AuditEvent[]
+  organizations Organization[]
+  emailTokens   EmailToken[]
+  timeEntries   TimeEntry[]
 }
 
 model Session {
@@ -118,6 +123,18 @@ model Company {
   isActive           Boolean  @default(true)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+  /// Branding: logo printed on documents (PNG or JPEG, at most 1 MB) and the document template settings
+  logo               Bytes?
+  logoMime           String?
+  template           Json     @default("{}")
+  /// E-mail: display name and reply-to address on documents sent from this company
+  emailFromName      String?
+  emailReplyTo       String?
+  /// Automatic overdue reminders and late fees (see billing/reminders.ts for the shape)
+  reminderSettings   Json     @default("{}")
+  lateFeeSettings    Json     @default("{}")
+  /// SaaS edition: the subscribing business that owns this company (null when self-hosted)
+  organizationId     String?  @db.Uuid
 
   memberships       CompanyMembership[]
   fiscalYears       FiscalYear[]
@@ -160,6 +177,29 @@ model Company {
   items             Item[]
   salesReceipts     SalesReceipt[]
   salesReceiptLines SalesReceiptLine[]
+  organization      Organization?        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  emailMessages     EmailMessage[]
+  estimates         Estimate[]
+  estimateLines     EstimateLine[]
+  recurring         RecurringTemplate[]
+  reminders         InvoiceReminder[]
+  stripeAccount     StripeAccount?
+  stripeCheckouts   StripeCheckout[]
+  stripeEvents      StripeEvent[]
+  deposits          Deposit[]
+  depositLines      DepositLine[]
+  inventoryMoves    InventoryMovement[]
+  purchaseOrders    PurchaseOrder[]
+  purchaseOrderLines PurchaseOrderLine[]
+  creditApplications CreditApplication[]
+  projects          Project[]
+  timeEntries       TimeEntry[]
+  classes           TrackingClass[]
+  locations         Location[]
+  budgets           Budget[]
+  budgetLines       BudgetLine[]
+
+  @@index([organizationId])
 }
 
 model CompanyMembership {
@@ -343,6 +383,9 @@ model Account {
   isActive    Boolean        @default(true)
   /// Classification in the statement of cash flows (null = default by account type)
   cashFlow    CashFlowClass?
+  /// Holding accounts the app manages: UNDEPOSITED_FUNDS, STRIPE_CLEARING (a column, not an AccountRole value, so older
+  /// builds can still read the table after an upgrade)
+  special     String?
   createdAt   DateTime       @default(now())
 
   company         Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -360,6 +403,7 @@ model Account {
 
   @@unique([companyId, code])
   @@unique([companyId, role])
+  @@unique([companyId, special])
   @@index([companyId])
 }
 
@@ -415,6 +459,10 @@ model JournalLine {
   credit    Decimal @default(0) @db.Decimal(19, 4)
   memo      String?
   contactId String? @db.Uuid
+  /// Tracking dimensions (phase 7): class per line, location per transaction
+  classId    String? @db.Uuid
+  locationId String? @db.Uuid
+  projectId  String? @db.Uuid
 
   entry   JournalEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
   company Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
@@ -423,6 +471,9 @@ model JournalLine {
   @@unique([entryId, lineNo])
   @@index([companyId, accountId])
   @@index([entryId])
+  @@index([companyId, classId])
+  @@index([companyId, locationId])
+  @@index([companyId, projectId])
 }
 
 model Contact {
@@ -446,6 +497,9 @@ model Contact {
   payments      Payment[]
   expenses      Expense[]
   salesReceipts SalesReceipt[]
+  estimates     Estimate[]
+  purchaseOrders PurchaseOrder[]
+  projects      Project[]
 
   @@index([companyId, name])
 }
@@ -513,11 +567,25 @@ model Invoice {
   message        String?
   /// Internal note, not printed
   memo           String?
+  /// Converted from this estimate
+  estimateId     String?        @db.Uuid
+  /// Created by this recurring template
+  recurringId    String?        @db.Uuid
+  /// This invoice is the late fee charged on another invoice (one per invoice)
+  lateFeeForId   String?        @unique @db.Uuid
+  /// Customer link (view, download, Pay now). Random, unguessable; null until the invoice is first sent or shared.
+  payToken       String?        @unique
+  lastSentAt     DateTime?
+  locationId     String?        @db.Uuid
 
   company     Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
   contact     Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
   lines       InvoiceLine[]
   allocations PaymentAllocation[]
+  creditsApplied CreditApplication[] @relation("AppliedToInvoice")
+  creditsGiven   CreditApplication[] @relation("CreditInvoice")
+  reminders   InvoiceReminder[]
+  checkouts   StripeCheckout[]
 
   @@unique([companyId, number])
   @@index([companyId, status])
@@ -538,8 +606,13 @@ model InvoiceLine {
   taxAmount   Decimal   @default(0) @db.Decimal(19, 4)
   itemId      String?   @db.Uuid
   serviceDate DateTime? @db.Date
+  classId     String?   @db.Uuid
+  projectId   String?   @db.Uuid
+  /// Inventory items: cost of goods sold recorded when the invoice was posted (quantity × average cost)
+  cogs        Decimal?  @db.Decimal(19, 4)
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  timeEntries TimeEntry[]
   company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
   taxCode TaxCode @relation(fields: [taxCodeId], references: [id], onDelete: Restrict)
@@ -566,11 +639,17 @@ model Bill {
   journalEntryId String?        @unique @db.Uuid
   createdById    String         @db.Uuid
   createdAt      DateTime       @default(now())
+  memo            String?
+  purchaseOrderId String?       @db.Uuid
+  recurringId     String?       @db.Uuid
+  locationId      String?       @db.Uuid
 
   company     Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
   contact     Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
   lines       BillLine[]
   allocations PaymentAllocation[]
+  creditsApplied CreditApplication[] @relation("AppliedToBill")
+  creditsGiven   CreditApplication[] @relation("CreditBill")
 
   @@unique([companyId, number])
   @@index([companyId, status])
@@ -589,6 +668,13 @@ model BillLine {
   net         Decimal @default(0) @db.Decimal(19, 4)
   taxDetail   Json    @default("[]")
   taxAmount   Decimal @default(0) @db.Decimal(19, 4)
+  itemId      String? @db.Uuid
+  classId     String? @db.Uuid
+  projectId   String? @db.Uuid
+  /// Billable to a customer: re-invoiced later (phase 6); invoiceLineId is set once it is on an invoice
+  billable      Boolean @default(false)
+  billableToId  String? @db.Uuid
+  invoiceLineId String? @db.Uuid
 
   bill    Bill    @relation(fields: [billId], references: [id], onDelete: Cascade)
   company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
@@ -612,11 +698,15 @@ model Payment {
   voidEntryId    String?          @db.Uuid
   createdById    String           @db.Uuid
   createdAt      DateTime         @default(now())
+  /// Set when the money (in Undeposited Funds or Stripe clearing) has been grouped into a bank deposit
+  depositId      String?          @db.Uuid
+  method         PaymentMethod?
 
   company     Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
   contact     Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
   bankAccount Account             @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
   allocations PaymentAllocation[]
+  deposit     Deposit?            @relation(fields: [depositId], references: [id], onDelete: Restrict)
 
   @@index([companyId, date])
 }
@@ -655,6 +745,8 @@ model Expense {
   submittedById     String        @db.Uuid
   decidedById       String?       @db.Uuid
   createdAt         DateTime      @default(now())
+  recurringId       String?       @db.Uuid
+  locationId        String?       @db.Uuid
 
   company  Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
   contact  Contact?      @relation(fields: [contactId], references: [id], onDelete: Restrict)
@@ -676,6 +768,11 @@ model ExpenseLine {
   net         Decimal @default(0) @db.Decimal(19, 4)
   taxDetail   Json    @default("[]")
   taxAmount   Decimal @default(0) @db.Decimal(19, 4)
+  classId       String? @db.Uuid
+  projectId     String? @db.Uuid
+  billable      Boolean @default(false)
+  billableToId  String? @db.Uuid
+  invoiceLineId String? @db.Uuid
 
   expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
   company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
@@ -1211,8 +1308,19 @@ model Item {
   taxCodeId       String?  @db.Uuid
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
+  /// Inventory (phase 4): a boolean rather than a new ItemType value, so older builds still read the table
+  trackInventory     Boolean  @default(false)
+  qtyOnHand          Decimal  @default(0) @db.Decimal(19, 4)
+  /// Weighted-average unit cost
+  avgCost            Decimal  @default(0) @db.Decimal(19, 6)
+  inventoryAccountId String?  @db.Uuid
+  cogsAccountId      String?  @db.Uuid
+  purchaseCost       Decimal? @db.Decimal(19, 4)
+  purchaseDescription String?
+  reorderPoint       Decimal? @db.Decimal(19, 4)
 
   company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  movements     InventoryMovement[]
   incomeAccount Account  @relation("ItemIncome", fields: [incomeAccountId], references: [id], onDelete: Restrict)
   taxCode       TaxCode? @relation(fields: [taxCodeId], references: [id], onDelete: Restrict)
 
@@ -1250,11 +1358,15 @@ model SalesReceipt {
   journalEntryId   String?        @unique @db.Uuid
   createdById      String         @db.Uuid
   createdAt        DateTime       @default(now())
+  depositId        String?        @db.Uuid
+  locationId       String?        @db.Uuid
+  lastSentAt       DateTime?
 
   company        Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
   contact        Contact            @relation(fields: [contactId], references: [id], onDelete: Restrict)
   depositAccount Account            @relation("ReceiptDeposit", fields: [depositAccountId], references: [id], onDelete: Restrict)
   lines          SalesReceiptLine[]
+  deposit        Deposit?           @relation(fields: [depositId], references: [id], onDelete: Restrict)
 
   @@unique([companyId, number])
   @@index([companyId, date])
@@ -1275,6 +1387,9 @@ model SalesReceiptLine {
   taxAmount   Decimal   @default(0) @db.Decimal(19, 4)
   itemId      String?   @db.Uuid
   serviceDate DateTime? @db.Date
+  classId     String?   @db.Uuid
+  projectId   String?   @db.Uuid
+  cogs        Decimal?  @db.Decimal(19, 4)
 
   receipt SalesReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
   company Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
@@ -1282,4 +1397,493 @@ model SalesReceiptLine {
   taxCode TaxCode      @relation(fields: [taxCodeId], references: [id], onDelete: Restrict)
 
   @@unique([receiptId, lineNo])
+}
+
+// ============================== 1.0.1: e-mail, estimates, recurring, payments, inventory, purchasing, projects, tracking ==============================
+
+/// Every e-mail the app sends (documents, statements, reminders, account e-mails), with the provider's result.
+model EmailMessage {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String?  @db.Uuid
+  /// invoice | sales_receipt | estimate | statement | reminder | purchase_order | verify_email | password_reset
+  kind        String
+  documentId  String?  @db.Uuid
+  to          String[]
+  cc          String[]
+  subject     String
+  /// SENT | FAILED
+  status      String
+  providerId  String?
+  error       String?
+  sentById    String?  @db.Uuid
+  createdAt   DateTime @default(now())
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+  @@index([companyId, kind, documentId])
+}
+
+enum EstimateStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CLOSED
+  VOID
+}
+
+/// A quote. No ledger effect; converting it creates a draft invoice with the same lines.
+model Estimate {
+  id             String         @id @default(uuid()) @db.Uuid
+  companyId      String         @db.Uuid
+  contactId      String         @db.Uuid
+  number         String
+  status         EstimateStatus @default(PENDING)
+  issueDate      DateTime       @db.Date
+  expiryDate     DateTime?      @db.Date
+  taxInclusive   Boolean        @default(false)
+  currency       String         @default("CAD") @db.Char(3)
+  subtotal       Decimal        @default(0) @db.Decimal(19, 4)
+  taxTotal       Decimal        @default(0) @db.Decimal(19, 4)
+  total          Decimal        @default(0) @db.Decimal(19, 4)
+  billingAddress String?
+  message        String?
+  memo           String?
+  acceptedBy     String?
+  decidedAt      DateTime?
+  invoiceId      String?        @unique @db.Uuid
+  lastSentAt     DateTime?
+  createdById    String         @db.Uuid
+  createdAt      DateTime       @default(now())
+
+  company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact Contact        @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  lines   EstimateLine[]
+
+  @@unique([companyId, number])
+  @@index([companyId, status])
+}
+
+model EstimateLine {
+  id          String    @id @default(uuid()) @db.Uuid
+  estimateId  String    @db.Uuid
+  companyId   String    @db.Uuid
+  lineNo      Int
+  description String
+  quantity    Decimal   @db.Decimal(19, 4)
+  unitPrice   Decimal   @db.Decimal(19, 4)
+  accountId   String    @db.Uuid
+  taxCodeId   String    @db.Uuid
+  net         Decimal   @default(0) @db.Decimal(19, 4)
+  taxDetail   Json      @default("[]")
+  taxAmount   Decimal   @default(0) @db.Decimal(19, 4)
+  itemId      String?   @db.Uuid
+  serviceDate DateTime? @db.Date
+  classId     String?   @db.Uuid
+  projectId   String?   @db.Uuid
+
+  estimate Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  company  Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([estimateId, lineNo])
+}
+
+/// A schedule that creates invoices, bills or expenses. `payload` is the same input the create endpoint takes (dates
+/// are filled in at each run); it is validated when the template is saved and again at every run.
+model RecurringTemplate {
+  id          String    @id @default(uuid()) @db.Uuid
+  companyId   String    @db.Uuid
+  name        String
+  /// INVOICE | BILL | EXPENSE
+  kind        String
+  /// DRAFT (create only) | POST (create and post) | SEND (invoices: post and e-mail)
+  mode        String
+  /// DAILY | WEEKLY | MONTHLY | YEARLY
+  interval    String
+  every       Int       @default(1)
+  startDate   DateTime  @db.Date
+  endDate     DateTime? @db.Date
+  nextDate    DateTime? @db.Date
+  maxRuns     Int?
+  runCount    Int       @default(0)
+  /// Invoices and bills: due date = run date + this many days
+  daysDue     Int       @default(30)
+  payload     Json
+  isActive    Boolean   @default(true)
+  lastRunAt   DateTime?
+  lastError   String?
+  createdById String    @db.Uuid
+  createdAt   DateTime  @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, nextDate])
+}
+
+/// One row per overdue reminder sent, so a reminder stage is never sent twice for the same invoice.
+model InvoiceReminder {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @db.Uuid
+  invoiceId String   @db.Uuid
+  /// days after the due date (the reminder stage)
+  stage     Int
+  sentAt    DateTime @default(now())
+  emailId   String?  @db.Uuid
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@unique([invoiceId, stage])
+}
+
+/// The company's own Stripe account (its keys, encrypted with ENCRYPTION_KEY). Card payments land in the clearing account.
+model StripeAccount {
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @unique @db.Uuid
+  secretKeyEnc      String
+  webhookSecretEnc  String?
+  /// test | live, from the key prefix
+  mode              String
+  accountName       String?
+  clearingAccountId String   @db.Uuid
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+/// A Stripe Checkout Session opened from an invoice's Pay now link.
+model StripeCheckout {
+  id              String   @id @default(uuid()) @db.Uuid
+  companyId       String   @db.Uuid
+  invoiceId       String   @db.Uuid
+  sessionId       String   @unique
+  url             String
+  amount          Decimal  @db.Decimal(19, 4)
+  /// OPEN | COMPLETED | EXPIRED | NEEDS_REVIEW (paid but not recorded automatically: overpaid, void invoice, other currency)
+  status          String   @default("OPEN")
+  paymentIntentId String?
+  paymentId       String?  @unique @db.Uuid
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+}
+
+/// Stripe webhook events already processed (Stripe may deliver the same event more than once).
+model StripeEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  companyId  String   @db.Uuid
+  eventId    String
+  type       String
+  receivedAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, eventId])
+}
+
+/// A bank deposit: money held in Undeposited Funds / Stripe clearing (payments and sales receipts) plus other lines
+/// (fees as negative amounts, other income), moved into a bank account as one entry.
+model Deposit {
+  id             String    @id @default(uuid()) @db.Uuid
+  companyId      String    @db.Uuid
+  date           DateTime  @db.Date
+  bankAccountId  String    @db.Uuid
+  memo           String?
+  total          Decimal   @db.Decimal(19, 4)
+  journalEntryId String    @unique @db.Uuid
+  voidedAt       DateTime?
+  createdById    String    @db.Uuid
+  createdAt      DateTime  @default(now())
+
+  company  Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  lines    DepositLine[]
+  payments Payment[]
+  receipts SalesReceipt[]
+
+  @@index([companyId, date])
+}
+
+model DepositLine {
+  id          String  @id @default(uuid()) @db.Uuid
+  depositId   String  @db.Uuid
+  companyId   String  @db.Uuid
+  lineNo      Int
+  /// payment | sales_receipt | other
+  sourceType  String
+  sourceId    String? @db.Uuid
+  accountId   String  @db.Uuid
+  contactId   String? @db.Uuid
+  description String?
+  /// positive adds to the deposit; negative (fees) reduces it
+  amount      Decimal @db.Decimal(19, 4)
+
+  deposit Deposit @relation(fields: [depositId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  @@unique([depositId, lineNo])
+}
+
+/// Perpetual inventory: every change in quantity or value of an inventory item, in posting order.
+model InventoryMovement {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @db.Uuid
+  itemId         String   @db.Uuid
+  date           DateTime @db.Date
+  /// bill | vendor_credit | invoice | credit_note | sales_receipt | adjustment | reversal
+  sourceType     String
+  sourceId       String?  @db.Uuid
+  quantity       Decimal  @db.Decimal(19, 4)
+  value          Decimal  @db.Decimal(19, 4)
+  qtyAfter       Decimal  @db.Decimal(19, 4)
+  avgCostAfter   Decimal  @db.Decimal(19, 6)
+  journalEntryId String?  @db.Uuid
+  memo           String?
+  createdById    String   @db.Uuid
+  createdAt      DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  item    Item    @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, itemId, createdAt])
+  @@index([companyId, sourceType, sourceId])
+}
+
+enum PurchaseOrderStatus {
+  OPEN
+  CLOSED
+  VOID
+}
+
+/// A purchase order: no ledger effect; converting it creates a draft bill.
+model PurchaseOrder {
+  id           String              @id @default(uuid()) @db.Uuid
+  companyId    String              @db.Uuid
+  contactId    String              @db.Uuid
+  number       String
+  status       PurchaseOrderStatus @default(OPEN)
+  issueDate    DateTime            @db.Date
+  expectedDate DateTime?           @db.Date
+  taxInclusive Boolean             @default(false)
+  currency     String              @default("CAD") @db.Char(3)
+  subtotal     Decimal             @default(0) @db.Decimal(19, 4)
+  taxTotal     Decimal             @default(0) @db.Decimal(19, 4)
+  total        Decimal             @default(0) @db.Decimal(19, 4)
+  shipTo       String?
+  message      String?
+  memo         String?
+  billId       String?             @unique @db.Uuid
+  lastSentAt   DateTime?
+  createdById  String              @db.Uuid
+  createdAt    DateTime            @default(now())
+
+  company Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  lines   PurchaseOrderLine[]
+
+  @@unique([companyId, number])
+  @@index([companyId, status])
+}
+
+model PurchaseOrderLine {
+  id          String  @id @default(uuid()) @db.Uuid
+  orderId     String  @db.Uuid
+  companyId   String  @db.Uuid
+  lineNo      Int
+  description String
+  quantity    Decimal @db.Decimal(19, 4)
+  unitPrice   Decimal @db.Decimal(19, 4)
+  accountId   String  @db.Uuid
+  taxCodeId   String  @db.Uuid
+  net         Decimal @default(0) @db.Decimal(19, 4)
+  taxDetail   Json    @default("[]")
+  taxAmount   Decimal @default(0) @db.Decimal(19, 4)
+  itemId      String? @db.Uuid
+  classId     String? @db.Uuid
+  projectId   String? @db.Uuid
+
+  order   PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, lineNo])
+}
+
+/// A credit note applied to an invoice, or a supplier credit applied to a bill. Both documents are already in A/R (A/P),
+/// so applying one moves no money and posts no journal: it only settles the two balances against each other.
+model CreditApplication {
+  id              String    @id @default(uuid()) @db.Uuid
+  companyId       String    @db.Uuid
+  creditInvoiceId String?   @db.Uuid
+  invoiceId       String?   @db.Uuid
+  creditBillId    String?   @db.Uuid
+  billId          String?   @db.Uuid
+  amount          Decimal   @db.Decimal(19, 4)
+  date            DateTime  @db.Date
+  voidedAt        DateTime?
+  createdById     String    @db.Uuid
+  createdAt       DateTime  @default(now())
+
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  creditInvoice Invoice? @relation("CreditInvoice", fields: [creditInvoiceId], references: [id], onDelete: Restrict)
+  invoice       Invoice? @relation("AppliedToInvoice", fields: [invoiceId], references: [id], onDelete: Restrict)
+  creditBill    Bill?    @relation("CreditBill", fields: [creditBillId], references: [id], onDelete: Restrict)
+  bill          Bill?    @relation("AppliedToBill", fields: [billId], references: [id], onDelete: Restrict)
+
+  @@index([companyId])
+}
+
+enum ProjectStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  companyId   String        @db.Uuid
+  customerId  String        @db.Uuid
+  name        String
+  status      ProjectStatus @default(ACTIVE)
+  description String?
+  budget      Decimal?      @db.Decimal(19, 4)
+  startDate   DateTime?     @db.Date
+  endDate     DateTime?     @db.Date
+  createdAt   DateTime      @default(now())
+
+  company     Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer    Contact     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  timeEntries TimeEntry[]
+
+  @@unique([companyId, name])
+}
+
+/// Time worked. Billable time is added to an invoice later; invoiceLineId is set once it is.
+model TimeEntry {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @db.Uuid
+  userId        String   @db.Uuid
+  date          DateTime @db.Date
+  hours         Decimal  @db.Decimal(9, 2)
+  customerId    String?  @db.Uuid
+  projectId     String?  @db.Uuid
+  itemId        String?  @db.Uuid
+  description   String?
+  billable      Boolean  @default(false)
+  rate          Decimal? @db.Decimal(19, 4)
+  invoiceLineId String?  @db.Uuid
+  createdAt     DateTime @default(now())
+
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  invoiceLine InvoiceLine? @relation(fields: [invoiceLineId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, date])
+  @@index([companyId, customerId, billable])
+}
+
+/// Class (QuickBooks-style tracking category on lines, e.g. a department or product line). Named TrackingClass because
+/// "Class" is reserved in generated code.
+model TrackingClass {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @db.Uuid
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, name])
+}
+
+/// Location (a store, region or office), set per transaction.
+model Location {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @db.Uuid
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, name])
+}
+
+/// A budget for one fiscal year: an amount per account per month.
+model Budget {
+  id           String       @id @default(uuid()) @db.Uuid
+  companyId    String       @db.Uuid
+  fiscalYearId String       @db.Uuid
+  name         String
+  createdAt    DateTime     @default(now())
+
+  company Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lines   BudgetLine[]
+
+  @@unique([companyId, name])
+}
+
+model BudgetLine {
+  id        String   @id @default(uuid()) @db.Uuid
+  budgetId  String   @db.Uuid
+  companyId String   @db.Uuid
+  accountId String   @db.Uuid
+  /// first day of the month
+  month     DateTime @db.Date
+  amount    Decimal  @db.Decimal(19, 4)
+
+  budget  Budget  @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([budgetId, accountId, month])
+}
+
+// ============================== 1.0.1: SaaS edition ==============================
+
+/// The subscribing business (APP_MODE=saas). It owns companies; its subscription decides what they may do.
+model Organization {
+  id                   String    @id @default(uuid()) @db.Uuid
+  name                 String
+  ownerId              String    @db.Uuid
+  /// starter | essentials | plus (see apps/api/src/saas/plans.ts)
+  plan                 String    @default("essentials")
+  /// Stripe subscription status, or "trialing" during the app's own trial before any checkout
+  status               String    @default("trialing")
+  trialEndsAt          DateTime?
+  stripeCustomerId     String?   @unique
+  stripeSubscriptionId String?   @unique
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean   @default(false)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  owner     User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  companies Company[]
+
+  @@index([ownerId])
+}
+
+/// One-time tokens sent by e-mail (address verification). Only the SHA-256 is stored.
+model EmailToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  purpose   String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Platform Stripe webhook events already processed (SaaS billing).
+model BillingEvent {
+  id         String   @id
+  type       String
+  receivedAt DateTime @default(now())
 }

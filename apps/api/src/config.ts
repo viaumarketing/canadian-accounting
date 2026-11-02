@@ -49,6 +49,20 @@ const envSchema = z.object({
   BANK_MAX_PAGES_PER_RUN: z.coerce.number().int().min(1).default(40),
   /** The worker stops taking new jobs while its memory use is above this share of its container limit. */
   WORKER_MEMORY_PAUSE_PCT: z.coerce.number().min(50).max(99).default(85),
+  /** selfhosted = one installation for your own companies (UGREEN NAS); saas = public sign-up, subscriptions and plan limits */
+  APP_MODE: z.enum(['selfhosted', 'saas']).default('selfhosted'),
+  APP_NAME: z.string().default('Canadian Accounting'),
+  /** Resend (https://resend.com) API key; without it the app cannot send e-mail and says so instead of pretending to. */
+  RESEND_API_KEY: z.string().optional(),
+  /** Sender address on a domain verified in Resend, e.g. billing@mail.example.com (the display name is set per company). */
+  MAIL_FROM: z.string().email().optional(),
+  /** SaaS edition billing: the platform's own Stripe account (not a company's). */
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_PRICE_STARTER: z.string().optional(),
+  STRIPE_PRICE_ESSENTIALS: z.string().optional(),
+  STRIPE_PRICE_PLUS: z.string().optional(),
+  SAAS_TRIAL_DAYS: z.coerce.number().int().min(1).max(90).default(30),
   GIT_SHA: z.string().optional(),
   BUILD_TIME: z.string().optional(),
   APP_VERSION: z.string().default('dev'),
@@ -57,8 +71,8 @@ const envSchema = z.object({
 export type AppConfig = z.infer<typeof envSchema>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const blank = (k: string) => env[k] || undefined;
-  const parsed = envSchema.safeParse({ ...env, SETUP_TOKEN: blank('SETUP_TOKEN'), SHOPIFY_CLIENT_ID: blank('SHOPIFY_CLIENT_ID'), SHOPIFY_CLIENT_SECRET: blank('SHOPIFY_CLIENT_SECRET'), SHOPIFY_WEBHOOK_BASE_URL: blank('SHOPIFY_WEBHOOK_BASE_URL'), REDIS_URL: blank('REDIS_URL'), QUEUE_MODE: blank('QUEUE_MODE'), BACKUP_DIR: blank('BACKUP_DIR'), DOCUMENTS_DIR: blank('DOCUMENTS_DIR'), MONITOR_PATHS: blank('MONITOR_PATHS'), GIT_SHA: blank('GIT_SHA'), BUILD_TIME: blank('BUILD_TIME'), PLAID_CLIENT_ID: blank('PLAID_CLIENT_ID'), PLAID_SECRET: blank('PLAID_SECRET'), PLAID_REDIRECT_URI: blank('PLAID_REDIRECT_URI') });
+  // An empty variable (KEY= in .env) means "not set", so optional settings fall back to their defaults.
+  const parsed = envSchema.safeParse(Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v === '' ? undefined : v])));
   if (!parsed.success) {
     const msg = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n  ');
     throw new Error(`Invalid environment configuration:\n  ${msg}`);

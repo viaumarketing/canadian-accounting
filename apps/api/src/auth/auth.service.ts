@@ -50,6 +50,10 @@ export class AuthService {
         throw new UnauthorizedException({ code: 'INVALID_MFA', message: 'Invalid verification code' });
       }
     }
+    // SaaS sign-ups confirm their e-mail before the first session (invited members and self-hosted users have no such token).
+    if (this.config.APP_MODE === 'saas' && !user.emailVerifiedAt && (await this.prisma.emailToken.findFirst({ where: { userId: user.id, purpose: 'verify_email' } }))) {
+      throw new HttpException({ code: 'EMAIL_NOT_VERIFIED', message: 'Confirm your e-mail address first: use the link we sent you' }, HttpStatus.FORBIDDEN);
+    }
     await this.prisma.user.update({
       where: { id: user.id },
       data: { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() },

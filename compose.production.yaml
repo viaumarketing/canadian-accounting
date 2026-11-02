@@ -3,7 +3,7 @@
 #
 # Networks
 #   internal  no route anywhere: PostgreSQL and Redis live only here.
-#   egress    outbound internet only (no published ports): api and worker call Shopify and the bank-feed provider.
+#   egress    outbound internet only (no published ports): api and worker call Shopify, the bank-feed provider, Resend and Stripe.
 #   edge      Caddy, the only service that publishes ports (HTTPS for your LAN / VPN).
 #
 # Memory budget (container limits, about 3.3 GB in total) leaves 4.5+ GB of the 8 GB for UGOS, its apps and the page cache.
@@ -45,6 +45,16 @@ x-app-env: &appenv
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
   SYNC_MAX_BACKLOG: ${SYNC_MAX_BACKLOG:-20}
   BANK_MAX_PAGES_PER_RUN: ${BANK_MAX_PAGES_PER_RUN:-40}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  MAIL_FROM: ${MAIL_FROM:-}
+  APP_MODE: ${APP_MODE:-selfhosted}
+  APP_NAME: ${APP_NAME:-Canadian Accounting}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  STRIPE_PRICE_STARTER: ${STRIPE_PRICE_STARTER:-}
+  STRIPE_PRICE_ESSENTIALS: ${STRIPE_PRICE_ESSENTIALS:-}
+  STRIPE_PRICE_PLUS: ${STRIPE_PRICE_PLUS:-}
+  SAAS_TRIAL_DAYS: ${SAAS_TRIAL_DAYS:-30}
 
 services:
   postgres:

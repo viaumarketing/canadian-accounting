@@ -11,13 +11,14 @@ import {
 } from '@ca/shared';
 import { PrismaService } from '../prisma.service';
 import { AuditService } from '../audit/audit.service';
+import { SaasService } from '../saas/saas.service';
 import { hashPassword } from '../auth/password';
 import { currentFiscalYear } from './fiscal-year';
 import { seedAccounting } from '../accounting/setup';
 
 @Injectable()
 export class CompaniesService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly saas: SaasService) {}
 
   /**
    * Platform provisioning. The owner is named explicitly; the acting super admin gets no
@@ -181,6 +182,7 @@ export class CompaniesService {
         where: { companyId_userId: { companyId, userId: user.id } },
       });
       if (existing) throw new ConflictException({ code: 'ALREADY_MEMBER', message: 'User is already a member' });
+      await this.saas.assertSeat(tx, companyId, user.id);
       const m = await tx.companyMembership.create({ data: { companyId, userId: user.id, role: input.role } });
       await this.audit.record(
         { action: 'member.added', companyId, actorId, entityType: 'CompanyMembership', entityId: m.id, metadata: { userId: user.id, role: input.role, newUser: created }, ip },

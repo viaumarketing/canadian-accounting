@@ -16,10 +16,13 @@ export async function createApp(config = loadConfig()) {
   });
   app.set('trust proxy', 1); // behind Caddy / Next proxy: use X-Forwarded-For for client IP
   app.use(helmet());
-  // Statement uploads arrive as raw bytes (10 MB cap) on these paths only; everything else keeps the small default JSON limit.
+  // Uploads arrive as raw bytes on these paths only (statements 10 MB, logos 1 MB); everything else keeps the small default JSON limit.
   const uploadPath = /^\/companies\/[^/]+\/banking\/accounts\/[^/]+\/import\//;
+  const logoPath = /^\/companies\/[^/]+\/branding\/logo$/;
   const rawBody = raw({ type: 'application/octet-stream', limit: '10mb' });
-  app.use((req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => (uploadPath.test(req.path) ? rawBody(req, res, next) : next()));
+  // The service enforces the 1 MB logo limit with a clear message; the parser only stops absurd uploads (413).
+  const rawLogo = raw({ type: 'application/octet-stream', limit: '2mb' });
+  app.use((req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => (uploadPath.test(req.path) ? rawBody(req, res, next) : logoPath.test(req.path) && req.method === 'POST' ? rawLogo(req, res, next) : next()));
   app.use(cookieParser());
   app.useGlobalFilters(new HttpExceptionFilter());
   app.enableShutdownHooks();
