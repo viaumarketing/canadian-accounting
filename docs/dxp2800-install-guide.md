@@ -115,7 +115,7 @@ Copy them into a **second** folder next to the data folder, for example `docker/
    docker compose -f compose.production.yaml exec backup /scripts/restore.sh /backups/<file name from the line above>
    ```
    The last line must say `ledger balanced (sum debit - sum credit): 0`.
-4. **Copy backups off the NAS** regularly (USB drive, second NAS, or UGOS Sync & Backup to another device). A backup that lives only on the NAS does not survive the NAS.
+4. **Copy backups off the NAS automatically.** Plug in a USB drive (or mount another NAS share), find its path in File Manager → Properties, put it in `.env` as `BACKUP_COPY_DIR=<that path>`, then run `docker compose -f compose.production.yaml up -d`. System health → Backups should show "Off-NAS copy: ok" after the next backup (or run one now: `docker compose -f compose.production.yaml exec backup /bin/sh /scripts/backup-once.sh`). A backup that lives only on the NAS does not survive the NAS.
 5. **Turn SSH off** again (Control Panel → Terminal).
 6. **Do not** forward any port to the NAS on your router. To use the app from outside, use a VPN to your home network instead.
 

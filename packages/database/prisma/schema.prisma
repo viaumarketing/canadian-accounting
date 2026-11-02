@@ -59,6 +59,8 @@ model User {
   mfaEnabled          Boolean   @default(false)
   mfaSecretEnc        String? // AES-256-GCM envelope of the TOTP secret
   mfaPendingSecretEnc String? // set during enrolment, promoted on first valid code
+  /// TOTP time step (30 s) of the last accepted code: a code is never accepted twice
+  mfaLastStep         Int?
   failedLoginCount    Int       @default(0)
   lockedUntil         DateTime?
   lastLoginAt         DateTime?
@@ -178,6 +180,10 @@ model FiscalYear {
   endDate   DateTime           @db.Date
   status    FiscalYearStatus   @default(OPEN)
   createdAt DateTime           @default(now())
+  /// Year-end close: the journal that moved revenue and expenses to retained earnings (null if the year had no activity)
+  closingEntryId String?     @db.Uuid
+  closedAt       DateTime?
+  closedById     String?     @db.Uuid
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
@@ -195,6 +201,11 @@ model TaxRegistration {
   effectiveFrom      DateTime            @db.Date
   effectiveTo        DateTime?           @db.Date
   createdAt          DateTime            @default(now())
+  /// GST/HST Quick Method (CRA RC4058): first day the election is in effect; null = regular method
+  quickMethodFrom    DateTime?           @db.Date
+  /// Remittance rate (and optional credit for 0%-rate supplies) per sales tax code, e.g. {"HST_ON": {"rate": "0.044"}}.
+  /// Entered by the user from the RC4058 rate charts; the rates are never hard-coded.
+  quickMethodRates   Json?
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 

@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
-import EmbeddedPostgres from 'embedded-postgres';
 
 /**
  * Integration tests run against a real PostgreSQL (embedded binary, no Docker needed).
@@ -26,6 +25,14 @@ export default async function setup() {
   let url = process.env.TEST_DATABASE_URL;
 
   if (!url) {
+    // embedded-postgres registers async-exit-hook. Its 'beforeExit' handler calls process.exit(0), which replaced vitest's
+    // failure exit code with success (failing tests passed in CI), and its 'exit' handler throws ("done is not a function").
+    // Drop those two listeners; the server is stopped by the teardown returned below, and the library's SIGINT/SIGTERM
+    // handlers still clean up on Ctrl-C.
+    const before = { beforeExit: new Set(process.listeners('beforeExit')), exit: new Set(process.listeners('exit')) };
+    const { default: EmbeddedPostgres } = await import('embedded-postgres');
+    for (const l of process.listeners('beforeExit')) if (!before.beforeExit.has(l)) process.removeListener('beforeExit', l);
+    for (const l of process.listeners('exit')) if (!before.exit.has(l)) process.removeListener('exit', l);
     const dir = mkdtempSync(join(tmpdir(), 'ca-pg-'));
     const port = await freePort();
     const pg = new EmbeddedPostgres({ databaseDir: dir, user: 'test', password: 'test', port, persistent: false, onLog: () => {}, onError: () => {} });

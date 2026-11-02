@@ -22,6 +22,8 @@ export interface Report {
   sections: Section[];
   checks: Check[];
   notes: string[];
+  /** On-screen pages of a long report (exports are always complete and ignore this). */
+  paging?: { page: number; pages: number; pageSize: number; total: number };
 }
 
 export const col = (key: string, label: string, kind: ColKind = 'text'): Column => ({ key, label, kind });

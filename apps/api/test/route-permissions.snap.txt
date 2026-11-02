@@ -28,6 +28,8 @@ GET    /companies/:companyId/contacts  ->  sales:view
 GET    /companies/:companyId/contacts/:id  ->  sales:view
 GET    /companies/:companyId/dashboard  ->  company:view
 GET    /companies/:companyId/expenses  ->  expenses:view
+GET    /companies/:companyId/fiscal-years  ->  journal:view
+GET    /companies/:companyId/fiscal-years/:id/close-preview  ->  journal:view
 GET    /companies/:companyId/invoices  ->  sales:view
 GET    /companies/:companyId/invoices/:id  ->  sales:view
 GET    /companies/:companyId/journals  ->  journal:view
@@ -62,6 +64,7 @@ PATCH  /companies/:companyId/members/:membershipId  ->  members:create
 PATCH  /companies/:companyId/periods/:id  ->  journal:approve
 PATCH  /companies/:companyId/shopify/stores/:storeId/settings  ->  settings:create
 PATCH  /companies/:companyId/tax-rates/:id  ->  taxes:create
+PATCH  /companies/:companyId/tax-registrations/:registrationId/quick-method  ->  taxes:create
 POST   /admin/companies  ->  SUPER_ADMIN
 POST   /admin/users/:id/reset-mfa  ->  SUPER_ADMIN
 POST   /admin/users/:id/revoke-sessions  ->  SUPER_ADMIN
@@ -107,6 +110,8 @@ POST   /companies/:companyId/expenses/:id/approve  ->  expenses:approve
 POST   /companies/:companyId/expenses/:id/post  ->  expenses:post
 POST   /companies/:companyId/expenses/:id/reject  ->  expenses:approve
 POST   /companies/:companyId/fiscal-years  ->  journal:approve
+POST   /companies/:companyId/fiscal-years/:id/close  ->  journal:approve
+POST   /companies/:companyId/fiscal-years/:id/reopen  ->  journal:reverse
 POST   /companies/:companyId/invoices  ->  sales:create
 POST   /companies/:companyId/invoices/:id/post  ->  sales:post
 POST   /companies/:companyId/invoices/:id/void  ->  sales:reverse

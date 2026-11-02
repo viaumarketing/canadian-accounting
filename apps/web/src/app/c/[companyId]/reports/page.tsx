@@ -30,12 +30,12 @@ export default function ReportsPage() {
     new URLSearchParams(Object.entries({ ...q, ...extra }).filter(([, v]) => v !== '' && v !== undefined)).toString();
   const has = (p: string) => sel?.params.includes(p);
 
-  async function run() {
+  async function run(page?: number) {
     if (!sel) return;
     setBusy(true);
     setErr(null);
     try {
-      setReport(await api<ReportData>(`${base}/report/${sel.key}?${params()}`));
+      setReport(await api<ReportData>(`${base}/report/${sel.key}?${params(page ? { page: String(page) } : {})}`));
     } catch (e) {
       setReport(null);
       setErr(errorMessage(e));
@@ -104,7 +104,7 @@ export default function ReportsPage() {
                   <h2 className="font-semibold">{sel.title}</h2>
                   <p className="text-sm text-muted-foreground">{sel.description}</p>
                 </div>
-                <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { e.preventDefault(); void run(); }}>
+                <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { e.preventDefault(); void run(1); }}>
                   {has('from') && <Field label="From" htmlFor="rp-from" hint="blank = fiscal-year start"><Input id="rp-from" type="date" value={q.from ?? ''} onChange={(e) => set('from', e.target.value)} /></Field>}
                   {has('to') && <Field label="To" htmlFor="rp-to"><Input id="rp-to" type="date" value={q.to ?? today()} onChange={(e) => set('to', e.target.value)} /></Field>}
                   {has('asOf') && <Field label="As of" htmlFor="rp-asof"><Input id="rp-asof" type="date" value={q.asOf ?? today()} onChange={(e) => set('asOf', e.target.value)} /></Field>}
@@ -138,9 +138,9 @@ export default function ReportsPage() {
                 </form>
                 {sel.key === 'tax-gst-hst' && (
                   <details className="text-sm">
-                    <summary className="cursor-pointer font-medium">Amounts only you know (lines 104, 107, 110, 111, 205/405)</summary>
+                    <summary className="cursor-pointer font-medium">Amounts only you know (lines 104, 107, 110, 111, 205/405, and Quick Method items)</summary>
                     <div className="mt-2 flex flex-wrap gap-3">
-                      {([['adj104', 'Line 104 adjustments added'], ['adj107', 'Line 107 adjustments deducted'], ['instalments110', 'Line 110 instalments paid'], ['rebates111', 'Line 111 rebates'], ['selfAssess', 'Line 205/405 self-assessed']] as const).map(([k, l]) => (
+                      {([['adj104', 'Line 104 adjustments added'], ['adj107', 'Line 107 adjustments deducted'], ['instalments110', 'Line 110 instalments paid'], ['rebates111', 'Line 111 rebates'], ['selfAssess', 'Line 205/405 self-assessed'], ['itcCapital', 'Quick Method: ITCs on capital/real property'], ['qmOtherSales', 'Quick Method: other eligible sales incl. GST/HST (Shopify, bank)'], ['qmOtherRate', 'Quick Method: their remittance rate (e.g. 0.044)']] as const).map(([k, l]) => (
                         <Field key={k} label={l} htmlFor={`rp-${k}`}><Input id={`rp-${k}`} inputMode="decimal" value={q[k] ?? ''} onChange={(e) => set(k, e.target.value)} className="w-40" /></Field>
                       ))}
                     </div>
@@ -158,6 +158,13 @@ export default function ReportsPage() {
             </Card>
           )}
           {report && <ReportView r={report} />}
+          {report?.paging && report.paging.pages > 1 && (
+            <nav aria-label="Report pages" className="flex items-center gap-2 text-sm">
+              <Button size="sm" variant="outline" disabled={busy || report.paging.page <= 1} onClick={() => void run(report.paging!.page - 1)}>Previous</Button>
+              <span>Page {report.paging.page} of {report.paging.pages} · {report.paging.total.toLocaleString('en-CA')} lines · exports contain every line</span>
+              <Button size="sm" variant="outline" disabled={busy || report.paging.page >= report.paging.pages} onClick={() => void run(report.paging!.page + 1)}>Next</Button>
+            </nav>
+          )}
         </div>
       </div>
     </div>

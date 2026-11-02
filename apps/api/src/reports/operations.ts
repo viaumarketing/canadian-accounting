@@ -89,7 +89,7 @@ export async function forecast(c: Ctx, p: { asOf: string; weeks: number }): Prom
 // ------------------------------------------------------------------ expense report
 export async function expenseReport(c: Ctx, p: { from: string; to: string }): Promise<Report> {
   const accts = await loadAccounts(c);
-  const b = await balances(c, { from: p.from, to: p.to });
+  const b = await balances(c, { from: p.from, to: p.to, excludeClosing: true });
   const exp = accts.filter((a) => a.type === 'EXPENSE').map((a) => ({ a, v: natural(a, b.get(a.id)) })).filter((x) => !x.v.isZero()).sort((x, y) => y.v.comparedTo(x.v));
   const total = exp.reduce((s, x) => s.plus(x.v), D(0));
   const r = newReport(c, 'expenses', 'Expense Report', `${p.from} to ${p.to}`);
@@ -129,7 +129,7 @@ export async function revenueByChannel(c: Ctx, p: { from: string; to: string }):
   const r = newReport(c, 'revenue-by-channel', 'Revenue by Sales Channel', `${p.from} to ${p.to} · net of returns`);
   r.sections.push({ columns: [col('name', 'Channel'), col('amount', 'Revenue', 'money'), col('pct', '% of total', 'pct')], rows: [...by].filter(([, v]) => !v.isZero()).sort((a, b) => b[1].comparedTo(a[1])).map(([k, v]) => row({ name: k, amount: m2(v), pct: pct(v, total) })), totals: [row({ name: 'Total revenue', amount: m2(total) }, { bold: true })] });
   const accts = await loadAccounts(c);
-  const b = await balances(c, { from: p.from, to: p.to });
+  const b = await balances(c, { from: p.from, to: p.to, excludeClosing: true });
   const pl = accts.filter((a) => a.type === 'REVENUE').reduce((s, a) => s.plus(natural(a, b.get(a.id))), D(0));
   r.checks.push({ label: 'Channel total equals total revenue in the Profit and Loss', ok: pl.eq(total), detail: pl.eq(total) ? undefined : `${m2(total)} vs ${m2(pl)}` });
   r.notes.push('Channel is derived from what created each entry (Shopify order/refund, invoice, bank categorisation, manual journal). Voids and reversals follow the original entry.');

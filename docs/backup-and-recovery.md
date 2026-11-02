@@ -5,7 +5,7 @@
 
 ## What is NOT in the backup — keep these separately and offsite
 1. **`.env`** — above all `ENCRYPTION_KEY` and `BACKUP_PASSPHRASE`. Without the passphrase the backups cannot be opened; without the key, MFA secrets and Shopify/bank tokens in a restored database are unreadable (the app reports `ENCRYPTION_KEY_MISMATCH` and stays unready).
-2. A **copy of the backup files** on a different device or location. A backup on the same NAS does not survive the NAS.
+2. A **copy of the backup files** on a different device or location. A backup on the same NAS does not survive the NAS. Set `BACKUP_COPY_DIR` in `.env` to a USB drive or another NAS share mounted in UGOS: every verified backup (database + documents + checksums) is then copied there and re-checked. **System health → Backups** shows "Off-NAS copy: ok", "failed" (with the reason) or "not configured". A failed copy never stops the backup itself.
 3. Caddy's certificate state (`$DATA_DIR/caddy`) is re-creatable; devices must re-trust a new internal CA if it is lost.
 
 ## Test a backup (do this monthly)

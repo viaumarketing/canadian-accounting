@@ -107,7 +107,8 @@ services:
   # Folders made in UGOS File Manager belong to your NAS user; this fixes that on every start (only what is wrong is changed).
   prepare:
     image: ghcr.io/${GITHUB_REPOSITORY}/backup:${APP_VERSION}
-    entrypoint: ['/bin/sh', '-c', 'find /documents /backups ! -user 1000 -exec chown 1000:1000 {} + && chmod 700 /documents /backups && echo folders ready']
+    # The copy folder may be on a drive that does not support Linux ownership (exFAT): fixing it is best-effort.
+    entrypoint: ['/bin/sh', '-c', 'find /documents /backups ! -user 1000 -exec chown 1000:1000 {} + && chmod 700 /documents /backups && (chown 1000:1000 /backup-copy 2>/dev/null || true) && echo folders ready']
     user: '0:0'
     cap_drop: ['ALL']
     cap_add: ['CHOWN', 'FOWNER', 'DAC_READ_SEARCH']
@@ -116,6 +117,7 @@ services:
     volumes:
       - '${DATA_DIR}/documents:/documents'
       - '${DATA_DIR}/backups:/backups'
+      - '${BACKUP_COPY_DIR:-${DATA_DIR}/backups}:/backup-copy'
     restart: 'no'
 
   migrate:
@@ -218,9 +220,12 @@ services:
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
       BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
       DOCUMENTS_DIR: /documents
+      BACKUP_COPY_ENABLED: ${BACKUP_COPY_DIR:+1}
     volumes:
       - '${DATA_DIR}/backups:/backups'
       - '${DATA_DIR}/documents:/documents' # read-write only so a restore can put files back
+      # Off-NAS copy target; when BACKUP_COPY_DIR is not set this mounts the backups folder again and copying is off.
+      - '${BACKUP_COPY_DIR:-${DATA_DIR}/backups}:/backup-copy'
     depends_on:
       postgres: { condition: service_healthy }
       prepare: { condition: service_completed_successfully }

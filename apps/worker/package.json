@@ -11,13 +11,13 @@
     "test": "echo 'worker has no tests yet (no jobs until Milestone 3)'"
   },
   "dependencies": {
+    "@ca/api": "workspace:*",
     "@ca/database": "workspace:*",
-    "bullmq": "^5.58.0",
-    "ioredis": "^5.7.0",
-    "@ca/api": "workspace:*"
+    "bullmq": "^5.81.5",
+    "ioredis": "^5.11.1"
   },
   "devDependencies": {
-    "@types/node": "^22.18.0",
+    "@types/node": "^22.20.5",
     "typescript": "^5.9.3"
   },
   "files": [

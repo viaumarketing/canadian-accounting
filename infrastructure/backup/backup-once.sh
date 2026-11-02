@@ -44,9 +44,32 @@ mv "$tmp" "$out"
 echo "backup written: $out ($(wc -c < "$out") bytes)${docs_out:+ + documents $(wc -c < "$docs_out") bytes}"
 
 # Retention: delete files older than KEEP_DAYS, but always keep the newest KEEP_MIN so a run of failures can never empty the folder.
-ls -1t "$BACKUP_DIR"/ca-*.sql.gz.enc 2>/dev/null | tail -n +"$((KEEP_MIN + 1))" | while read -r f; do
-  if [ -n "$(find "$f" -mtime +"$KEEP_DAYS" 2>/dev/null)" ]; then
-    d="${f%.sql.gz.enc}.docs.tar.gz.enc"
-    rm -f "$f" "$f.sha256" "$d" "$d.sha256"; echo "pruned: $f"
+prune() {
+  ls -1t "$1"/ca-*.sql.gz.enc 2>/dev/null | tail -n +"$((KEEP_MIN + 1))" | while read -r f; do
+    if [ -n "$(find "$f" -mtime +"$KEEP_DAYS" 2>/dev/null)" ]; then
+      d="${f%.sql.gz.enc}.docs.tar.gz.enc"
+      rm -f "$f" "$f.sha256" "$d" "$d.sha256"; echo "pruned: $f"
+    fi
+  done
+}
+prune "$BACKUP_DIR"
+
+# Optional off-NAS copy (BACKUP_COPY_DIR: a USB drive or another NAS share). The verified files are copied, then their
+# checksums are checked again in the copy. A failed copy never fails the backup; it is recorded in copy-status.json
+# (shown in System administration) and in the log.
+if [ "${BACKUP_COPY_ENABLED:-}" = "1" ]; then
+  copy_dir="${BACKUP_COPY_DIR:-/backup-copy}"
+  copy_status=ok; copy_msg=""
+  copy_one() { cp "$1" "$copy_dir/$(basename "$1").partial" && mv "$copy_dir/$(basename "$1").partial" "$copy_dir/$(basename "$1")"; }
+  if [ ! -d "$copy_dir" ] || [ ! -w "$copy_dir" ]; then
+    copy_status=failed; copy_msg="copy folder is missing or not writable (is the drive connected and mounted?)"
+  elif ! { copy_one "$out" && copy_one "$out.sha256" && { [ -z "$docs_out" ] || { copy_one "$docs_out" && copy_one "$docs_out.sha256"; }; }; }; then
+    copy_status=failed; copy_msg="copying failed (disk full or drive removed?)"
+  elif ! (cd "$copy_dir" && sha256sum -c "$(basename "$out").sha256" >/dev/null && { [ -z "$docs_out" ] || sha256sum -c "$(basename "$docs_out").sha256" >/dev/null; }); then
+    copy_status=failed; copy_msg="the copy does not match its checksum"
+  else
+    prune "$copy_dir"
   fi
-done
+  printf '{"at":"%s","status":"%s","file":"%s","message":"%s"}\n' "$(date -u +%FT%TZ)" "$copy_status" "$(basename "$out")" "$copy_msg" > "$BACKUP_DIR/copy-status.json"
+  if [ "$copy_status" = ok ]; then echo "copied to $copy_dir: $(basename "$out")"; else echo "BACKUP COPY FAILED: $copy_msg" >&2; fi
+fi
