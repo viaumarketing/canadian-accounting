@@ -33,12 +33,35 @@ export class SaasService {
   get enabled() { return this.config.APP_MODE === 'saas'; }
   private need() { if (!this.enabled) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Not available on this installation' }); }
 
-  /** What the web app needs before sign-in: which edition this is and, for SaaS, the plans. */
-  publicConfig() {
+  /** What the web app needs before sign-in: which edition this is and, for SaaS, the plans with Stripe's prices. */
+  async publicConfig() {
+    if (!this.enabled) return { mode: this.config.APP_MODE, appName: this.config.APP_NAME };
+    const prices = await this.prices();
     return {
-      mode: this.config.APP_MODE, appName: this.config.APP_NAME,
-      ...(this.enabled ? { trialDays: this.config.SAAS_TRIAL_DAYS, plans: Object.values(PLANS).map((p) => ({ ...p, available: Boolean(this.priceId(p.id)) })), signup: this.mail.configured } : {}),
+      mode: this.config.APP_MODE, appName: this.config.APP_NAME, trialDays: this.config.SAAS_TRIAL_DAYS, signup: this.mail.configured,
+      plans: Object.values(PLANS).map((p) => ({ ...p, available: Boolean(this.priceId(p.id)), price: prices[p.id] ?? null })),
     };
+  }
+
+  private priceCache: { at: number; prices: Partial<Record<PlanId, { amount: number; currency: string; interval: string }>> } | null = null;
+  /** Each plan's price as Stripe has it (GET /v1/prices/:id: unit_amount, currency, recurring.interval), cached 10 minutes. */
+  private async prices() {
+    if (this.priceCache && Date.now() - this.priceCache.at < 600_000) return this.priceCache.prices;
+    const out: Partial<Record<PlanId, { amount: number; currency: string; interval: string }>> = {};
+    if (this.config.STRIPE_SECRET_KEY) {
+      for (const p of Object.keys(PLANS) as PlanId[]) {
+        const id = this.priceId(p);
+        if (!id) continue;
+        try {
+          const pr = await stripeRequest<{ unit_amount: number | null; currency: string; recurring: { interval: string } | null }>(this.config.STRIPE_SECRET_KEY, 'GET', `/v1/prices/${encodeURIComponent(id)}`);
+          if (pr.unit_amount !== null) out[p] = { amount: pr.unit_amount, currency: pr.currency, interval: pr.recurring?.interval ?? 'month' };
+        } catch (e) {
+          this.log.warn(`price ${id}: ${(e as Error).message}`);
+        }
+      }
+    }
+    this.priceCache = { at: Date.now(), prices: out };
+    return out;
   }
 
   private priceId(plan: PlanId) {

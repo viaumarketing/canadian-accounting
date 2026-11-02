@@ -298,6 +298,29 @@ export class BillingService {
     return outerTx ? run(outerTx) : this.prisma.$transaction(run);
   }
 
+  /** Drafts can be edited (lines are replaced); posted bills are changed only by voiding. The purchase-order link stays. */
+  async updateBill(companyId: string, id: string, i: BillInput, actorId: string, ip: string | null) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Bill" WHERE id = ${id}::uuid AND "companyId" = ${companyId}::uuid FOR UPDATE`;
+      const cur = await tx.bill.findFirst({ where: { id, companyId } });
+      if (!cur) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Bill not found' });
+      if (cur.status !== 'DRAFT') throw new ConflictException({ code: 'NOT_DRAFT', message: 'Only draft bills can be edited; void a posted bill instead' });
+      await this.checkContact(tx, companyId, i.contactId, 'VENDOR');
+      await this.checkAccounts(tx, companyId, i.lines.map((l) => l.accountId), ['EXPENSE', 'ASSET']);
+      await this.checkDims(tx, companyId, [], i.locationId);
+      const p = await this.priceLines(tx, companyId, i.issueDate, i.taxInclusive, i.lines);
+      const extras = await this.purchaseLineExtras(tx, companyId, i.lines);
+      await tx.billLine.deleteMany({ where: { billId: id } });
+      const bill = await tx.bill.update({
+        where: { id },
+        data: { contactId: i.contactId, kind: i.kind, supplierRef: i.supplierRef ?? null, memo: i.memo ?? null, locationId: i.locationId ?? null, issueDate: toDate(i.issueDate), dueDate: toDate(i.dueDate), taxInclusive: i.taxInclusive, subtotal: p.subtotal, taxTotal: p.taxTotal, total: p.total, lines: { create: p.priced.map((l, n) => ({ ...l, ...extras[n], companyId })) } },
+        include: { lines: true },
+      });
+      await this.audit.record({ action: 'bill.updated', companyId, actorId, entityType: 'Bill', entityId: id, ip }, tx);
+      return bill;
+    });
+  }
+
   async postBill(companyId: string, id: string, actorId: string, ip: string | null, outerTx?: Tx) {
     const run = async (tx: Tx) => {
       await tx.$queryRaw`SELECT id FROM "Bill" WHERE id = ${id}::uuid AND "companyId" = ${companyId}::uuid FOR UPDATE`;

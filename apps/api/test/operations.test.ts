@@ -93,6 +93,9 @@ describe('purchase orders', () => {
     expect(bill).toMatchObject({ status: 'DRAFT', total: '90.4', purchaseOrderId: po.id, supplierRef: 'INV-778' });
     expect((await root.get(`/companies/${co.id}/purchase-orders/${po.id}`).expect(200)).body).toMatchObject({ status: 'CLOSED', billId: bill.id });
     expect((await root.put(`/companies/${co.id}/purchase-orders/${po.id}`, { contactId: co.vendor, issueDate: '2026-10-01', lines: [{ description: 'x', quantity: '1', unitPrice: '1', accountId: co.acct['6050'], taxCodeId: co.tax.HST_ON }] })).body.code).toBe('NOT_EDITABLE');
+    // editing the draft bill keeps its link to the order; a posted bill cannot be edited
+    const edited = (await root.put(`/companies/${co.id}/bills/${bill.id}`, { contactId: co.vendor, issueDate: '2026-10-16', dueDate: '2026-11-15', supplierRef: 'INV-778', lines: [{ description: 'Bottles (90 received)', quantity: '90', unitPrice: '0.80', accountId: co.acct['6050'], taxCodeId: co.tax.HST_ON }] }).expect(200)).body;
+    expect(edited).toMatchObject({ id: bill.id, purchaseOrderId: po.id, total: '81.36' });
     await root.post(`/companies/${co.id}/bills/${bill.id}/void`).expect(201);
     expect((await root.get(`/companies/${co.id}/purchase-orders/${po.id}`).expect(200)).body).toMatchObject({ status: 'OPEN', billId: null });
   });

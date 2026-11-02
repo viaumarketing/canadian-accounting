@@ -1,5 +1,5 @@
 'use client';
-import { Printer, Trash2, X } from 'lucide-react';
+import { Mail, Printer, Repeat, Trash2, X } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
@@ -9,26 +9,32 @@ import { api, errorMessage } from '@/lib/api';
 import { fmtMoney, today, useCompany } from '@/lib/company';
 import { useApi } from '@/lib/use-api';
 import { cn } from '@/lib/utils';
-import { ReceivePayment, StatusPill, type Account } from './common';
+import { ReceivePayment, SidePanel, StatusPill, type Account } from './common';
+import { SendDialog } from '@/components/shared/send-dialog';
+import { RecurringDialog } from '@/components/shared/recurring-dialog';
+import { useTracking } from '@/components/shared/tracking';
 
-export type FormKind = 'invoice' | 'credit' | 'receipt';
+export type FormKind = 'invoice' | 'credit' | 'receipt' | 'estimate';
 interface Contact { id: string; name: string; email: string | null; billingAddress: string | null; defaultTerms: string | null }
 interface Item { id: string; name: string; description: string | null; rate: string | null; incomeAccountId: string; taxCodeId: string | null }
 interface TaxCode { id: string; code: string; name: string; rates: { component: string; rate: string; effectiveFrom: string; effectiveTo: string | null }[] }
-interface SavedLine { itemId: string | null; serviceDate: string | null; description: string; quantity: string; unitPrice: string; accountId: string; taxCodeId: string; net: string; taxDetail: { component: string; rate: string; amount: string }[] }
+interface SavedLine { id?: string; itemId: string | null; serviceDate: string | null; description: string; quantity: string; unitPrice: string; accountId: string; taxCodeId: string; net: string; taxDetail: { component: string; rate: string; amount: string }[]; classId?: string | null; projectId?: string | null }
 interface SavedDoc {
   id: string; number: string | null; status: string; kind?: string; contactId: string; billingAddress: string | null; message: string | null; memo: string | null; taxInclusive: boolean;
   subtotal: string; taxTotal: string; total: string; amountPaid?: string; lines: SavedLine[];
   issueDate?: string; dueDate?: string; terms?: string | null; date?: string; paymentMethod?: string; referenceNo?: string | null; depositAccountId?: string; contact: { name: string };
+  expiryDate?: string | null; invoiceId?: string | null; acceptedBy?: string | null; locationId?: string | null; lastSentAt?: string | null; payToken?: string | null;
 }
-interface Line { key: number; sel: string; serviceDate: string; description: string; quantity: string; rate: string; taxCodeId: string }
+interface Billable { type: 'time' | 'bill_line' | 'expense_line'; id: string; date: string; description: string; quantity: string; rate: string | null; itemId: string | null; projectId: string | null }
+interface Line { key: number; sel: string; serviceDate: string; description: string; quantity: string; rate: string; taxCodeId: string; classId: string; projectId: string; sourceRef?: { type: Billable['type']; id: string } }
 
 const TERMS: [string, string, number][] = [['DUE_ON_RECEIPT', 'Due on receipt', 0], ['NET_15', 'Net 15', 15], ['NET_30', 'Net 30', 30], ['NET_60', 'Net 60', 60]];
 const METHODS: [string, string][] = [['CASH', 'Cash'], ['CHEQUE', 'Cheque'], ['CREDIT_CARD', 'Credit card'], ['DEBIT_CARD', 'Debit card'], ['E_TRANSFER', 'Interac e-Transfer'], ['OTHER', 'Other']];
 const DEFAULT_CODE: Record<string, string> = { ON: 'HST_ON', NS: 'HST_NS', NB: 'HST_NB', NL: 'HST_NL', PE: 'HST_PE', QC: 'GST_QST', BC: 'GST_PST_BC', SK: 'GST_PST_SK', MB: 'GST_PST_MB' };
 const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 let seq = 0;
-const blank = (taxCodeId = ''): Line => ({ key: ++seq, sel: '', serviceDate: '', description: '', quantity: '1', rate: '', taxCodeId });
+const blank = (taxCodeId = ''): Line => ({ key: ++seq, sel: '', serviceDate: '', description: '', quantity: '1', rate: '', taxCodeId, classId: '', projectId: '' });
+const ESTIMATE_STATUS: Record<string, string> = { PENDING: 'Pending', ACCEPTED: 'Accepted', DECLINED: 'Declined', CLOSED: 'Converted', VOID: 'Voided' };
 /** Browser-side estimate only (integer cents); the server recomputes every amount when the document is saved. */
 const cents = (v: string) => Math.round(parseFloat(v || '0') * 100) || 0;
 const areaCls = 'w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
@@ -38,19 +44,23 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
   const router = useRouter();
   const base = `/companies/${companyId}`;
   const receipt = kind === 'receipt';
-  const { data: saved, reload } = useApi<SavedDoc>(id ? `${base}/${receipt ? 'sales-receipts' : 'invoices'}/${id}` : null);
+  const estimate = kind === 'estimate';
+  const path = receipt ? 'sales-receipts' : estimate ? 'estimates' : 'invoices';
+  const listHref = `/c/${companyId}/sales/${receipt ? 'receipts' : estimate ? 'estimates' : 'invoices'}`;
+  const { data: saved, reload } = useApi<SavedDoc>(id ? `${base}/${path}/${id}` : null);
+  const tracking = useTracking(companyId, { projects: can('sales:view') });
   const { data: contacts, reload: reloadContacts } = useApi<Contact[]>(`${base}/contacts?kind=CUSTOMER`);
   const { data: items } = useApi<Item[]>(`${base}/items`);
   const { data: accounts } = useApi<Account[]>(can('accounts:view') ? `${base}/accounts` : null);
   const { data: taxCodes } = useApi<TaxCode[]>(can('taxes:view') ? `${base}/tax-codes` : null);
   const income = (accounts ?? []).filter((a) => a.type === 'REVENUE' && !a.role);
-  const depositAccounts = (accounts ?? []).filter((a) => a.type === 'ASSET' && !a.role);
+  const depositAccounts = (accounts ?? []).filter((a) => a.type === 'ASSET' && !a.role && (a as Account & { special?: string | null }).special !== 'STRIPE_CLEARING');
   const province = me.companies.find((c) => c.id === companyId)?.province ?? '';
   const defaultTax = (taxCodes ?? []).find((t) => t.code === (DEFAULT_CODE[province] ?? 'GST'))?.id ?? '';
 
   const isCredit = kind === 'credit' || saved?.kind === 'CREDIT';
-  const title = receipt ? 'Sales receipt' : isCredit ? 'Credit note' : 'Invoice';
-  const editable = !saved || saved.status === 'DRAFT';
+  const title = receipt ? 'Sales receipt' : estimate ? 'Estimate' : isCredit ? 'Credit note' : 'Invoice';
+  const editable = !saved || (estimate ? !['CLOSED', 'VOID'].includes(saved.status) : saved.status === 'DRAFT');
 
   const [contactId, setContactId] = useState(presetCustomer ?? '');
   const [billingAddress, setBillingAddress] = useState('');
@@ -68,15 +78,20 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
   const [busy, setBusy] = useState(false);
   const [newCustomer, setNewCustomer] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
+  const [expiryDate, setExpiryDate] = useState(addDays(today(), 30));
+  const [locationId, setLocationId] = useState('');
+  const [dialog, setDialog] = useState<null | 'send' | 'remind' | 'recurring' | 'billables'>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Load a saved document into the form.
   useEffect(() => {
     if (!saved) return;
-    setContactId(saved.contactId); setBillingAddress(saved.billingAddress ?? ''); setInclusive(saved.taxInclusive); setMessage(saved.message ?? ''); setMemo(saved.memo ?? '');
+    setContactId(saved.contactId); setBillingAddress(saved.billingAddress ?? ''); setInclusive(saved.taxInclusive); setMessage(saved.message ?? ''); setMemo(saved.memo ?? ''); setLocationId(saved.locationId ?? '');
     if (receipt) { setIssueDate(saved.date!.slice(0, 10)); setMethod(saved.paymentMethod!); setReferenceNo(saved.referenceNo ?? ''); setDepositId(saved.depositAccountId!); }
+    else if (estimate) { setIssueDate(saved.issueDate!.slice(0, 10)); setExpiryDate(saved.expiryDate?.slice(0, 10) ?? ''); }
     else { setIssueDate(saved.issueDate!.slice(0, 10)); setDueDate(saved.dueDate!.slice(0, 10)); setTerms(saved.terms ?? ''); }
-    setLines(saved.lines.map((l) => ({ key: ++seq, sel: l.itemId ? `item:${l.itemId}` : `acct:${l.accountId}`, serviceDate: l.serviceDate?.slice(0, 10) ?? '', description: l.description, quantity: String(Number(l.quantity)), rate: Number(l.unitPrice).toFixed(2), taxCodeId: l.taxCodeId })));
-  }, [saved, receipt]);
+    setLines(saved.lines.map((l) => ({ key: ++seq, sel: l.itemId ? `item:${l.itemId}` : `acct:${l.accountId}`, serviceDate: l.serviceDate?.slice(0, 10) ?? '', description: l.description, quantity: String(Number(l.quantity)), rate: Number(l.unitPrice).toFixed(2), taxCodeId: l.taxCodeId, classId: l.classId ?? '', projectId: l.projectId ?? '' })));
+  }, [saved, receipt, estimate]);
   // New documents: default tax code on empty lines once tax codes load.
   useEffect(() => { if (!id && defaultTax) setLines((ls) => ls.map((l) => (l.taxCodeId ? l : { ...l, taxCodeId: defaultTax }))); }, [defaultTax, id]);
   // A preset customer (from "Create invoice" on the customer list) fills its details.
@@ -89,7 +104,7 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
     const c = (contacts ?? []).find((x) => x.id === cid);
     if (!c) return;
     setBillingAddress(c.billingAddress ?? '');
-    if (!receipt && c.defaultTerms) { setTerms(c.defaultTerms); setDueDate(addDays(issueDate, TERMS.find((t) => t[0] === c.defaultTerms)?.[2] ?? 30)); }
+    if (!receipt && !estimate && c.defaultTerms) { setTerms(c.defaultTerms); setDueDate(addDays(issueDate, TERMS.find((t) => t[0] === c.defaultTerms)?.[2] ?? 30)); }
   }
   async function addCustomer() {
     if (!newCustomer?.trim()) return;
@@ -99,7 +114,7 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
     } catch (x) { setErr(errorMessage(x)); }
   }
   const pickTerms = (t: string) => { setTerms(t); const d = TERMS.find((x) => x[0] === t)?.[2]; if (d !== undefined) setDueDate(addDays(issueDate, d)); };
-  const pickDate = (d: string) => { setIssueDate(d); const n = TERMS.find((x) => x[0] === terms)?.[2]; if (!receipt && n !== undefined) setDueDate(addDays(d, n)); };
+  const pickDate = (d: string) => { setIssueDate(d); const n = TERMS.find((x) => x[0] === terms)?.[2]; if (!receipt && !estimate && n !== undefined) setDueDate(addDays(d, n)); };
 
   const setLine = (k: number, patch: Partial<Line>) => setLines((ls) => ls.map((l) => (l.key === k ? { ...l, ...patch } : l)));
   function pickProduct(k: number, sel: string) {
@@ -135,18 +150,34 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
   const showSaved = !!saved && !editable;
   const money = (c: number) => fmtMoney((c / 100).toFixed(2));
   const totalC = showSaved ? cents(saved!.total) : est.total;
-  const balanceC = showSaved && !receipt && !isCredit ? cents(saved!.total) - cents(saved!.amountPaid ?? '0') : totalC;
+  const balanceC = showSaved && !receipt && !isCredit && !estimate ? cents(saved!.total) - cents(saved!.amountPaid ?? '0') : totalC;
 
   function payload(post: boolean) {
     const ls = lines.filter((l) => l.description.trim() || l.rate).map((l) => {
       const item = l.sel.startsWith('item:') ? (items ?? []).find((i) => i.id === l.sel.slice(5)) : undefined;
       const accountId = item?.incomeAccountId ?? (l.sel.startsWith('acct:') ? l.sel.slice(5) : income[0]?.id);
-      return { ...(item ? { itemId: item.id } : {}), ...(l.serviceDate ? { serviceDate: l.serviceDate } : {}), description: l.description.trim() || item?.name || 'Sale', quantity: l.quantity || '1', unitPrice: l.rate || '0', accountId, taxCodeId: l.taxCodeId || defaultTax };
+      return { ...(item ? { itemId: item.id } : {}), ...(l.serviceDate ? { serviceDate: l.serviceDate } : {}), description: l.description.trim() || item?.name || 'Sale', quantity: l.quantity || '1', unitPrice: l.rate || '0', accountId, taxCodeId: l.taxCodeId || defaultTax, ...(l.classId ? { classId: l.classId } : {}), ...(l.projectId ? { projectId: l.projectId } : {}), ...(l.sourceRef ? { sourceRef: l.sourceRef } : {}) };
     });
-    const common = { contactId, taxInclusive: inclusive, lines: ls, ...(billingAddress.trim() ? { billingAddress: billingAddress.trim() } : {}), ...(message.trim() ? { message: message.trim() } : {}), ...(memo.trim() ? { memo: memo.trim() } : {}) };
+    const common = { contactId, taxInclusive: inclusive, lines: ls, ...(billingAddress.trim() ? { billingAddress: billingAddress.trim() } : {}), ...(message.trim() ? { message: message.trim() } : {}), ...(memo.trim() ? { memo: memo.trim() } : {}), ...(locationId ? { locationId } : {}) };
+    if (estimate) return { ...common, issueDate, ...(expiryDate ? { expiryDate } : {}) };
     return receipt
       ? { ...common, date: issueDate, paymentMethod: method, depositAccountId: depositId || depositAccounts[0]?.id, ...(referenceNo.trim() ? { referenceNo: referenceNo.trim() } : {}), post }
       : { ...common, kind: isCredit ? 'CREDIT' : 'STANDARD', issueDate, dueDate: isCredit ? issueDate : dueDate, ...(terms && !isCredit ? { terms } : {}) };
+  }
+  /** The saved invoice as a recurring template (the schedule supplies the dates). */
+  function recurringPayload() {
+    const p = payload(false) as Record<string, unknown>;
+    delete p.issueDate; delete p.dueDate;
+    return { ...p, lines: (p.lines as Record<string, unknown>[]).map(({ sourceRef: _s, ...l }) => l) };
+  }
+  function addBillables(picked: Billable[]) {
+    const income0 = income.find((a) => a.code === '4000')?.id ?? income[0]?.id;
+    const add = picked.map((b): Line => ({ ...blank(defaultTax), sel: b.itemId ? `item:${b.itemId}` : income0 ? `acct:${income0}` : '', serviceDate: b.date, description: b.description, quantity: b.quantity, rate: b.rate ?? '', projectId: b.projectId ?? '', sourceRef: { type: b.type, id: b.id } }));
+    setLines((ls) => [...ls.filter((l) => l.description.trim() || l.rate), ...add]);
+  }
+  async function act(fn: () => Promise<unknown>, done?: string) {
+    setErr(null); setNotice(null);
+    try { await fn(); await reload(); if (done) setNotice(done); } catch (x) { setErr(errorMessage(x)); }
   }
   async function save(post: boolean) {
     setErr(null);
@@ -154,40 +185,45 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
     if (!lines.some((l) => l.description.trim() || l.rate)) { setErr('Add at least one line.'); return; }
     setBusy(true);
     try {
-      const path = receipt ? 'sales-receipts' : 'invoices';
       const body = payload(post);
       let docId = id;
       if (id) await api(`${base}/${path}/${id}`, { method: 'PUT', body });
       else docId = (await api<{ id: string }>(`${base}/${path}`, { method: 'POST', body })).id;
-      if (post && !receipt) await api(`${base}/invoices/${docId}/post`, { method: 'POST' });
+      if (post && !receipt && !estimate) await api(`${base}/invoices/${docId}/post`, { method: 'POST' });
       if (id) await reload();
-      router.replace(`/c/${companyId}/sales/${receipt ? 'receipts' : 'invoices'}/${docId}`);
+      router.replace(`${listHref}/${docId}`);
     } catch (x) { setErr(errorMessage(x)); } finally { setBusy(false); }
   }
   async function voidDoc() {
     if (!saved || !window.confirm(saved.status === 'DRAFT' ? `Delete this draft ${title.toLowerCase()}?` : `Void ${title.toLowerCase()} ${saved.number}? A reversing entry is posted; the document stays on file as void.`)) return;
     setErr(null);
     try {
-      await api(`${base}/${receipt ? 'sales-receipts' : 'invoices'}/${saved.id}/void`, { method: 'POST' });
-      if (saved.status === 'DRAFT') router.replace(`/c/${companyId}/sales${receipt ? '/receipts' : '/invoices'}`); else await reload();
+      await api(`${base}/${path}/${saved.id}/void`, { method: 'POST' });
+      if (saved.status === 'DRAFT') router.replace(listHref); else await reload();
     } catch (x) { setErr(errorMessage(x)); }
   }
-  const close = () => router.push(`/c/${companyId}/sales${receipt ? '/receipts' : '/invoices'}`);
-  const pdf = saved ? `/api${base}/${receipt ? 'sales-receipts' : 'invoices'}/${saved.id}/pdf` : null;
-  const state = !saved ? null : saved.status === 'DRAFT' ? 'draft' : saved.status === 'VOID' ? 'void' : saved.status === 'PAID' ? 'paid' : 'open';
+  const close = () => router.push(listHref);
+  const pdf = saved ? `/api${base}/${path}/${saved.id}/pdf` : null;
+  const state = !saved ? null : estimate ? ({ PENDING: 'open', ACCEPTED: 'paid', DECLINED: 'overdue', CLOSED: 'paid', VOID: 'void' } as const)[saved.status as 'PENDING'] ?? 'open' : saved.status === 'DRAFT' ? 'draft' : saved.status === 'VOID' ? 'void' : saved.status === 'PAID' ? 'paid' : 'open';
   const ro = !editable;
+  const sendable = !!saved && (estimate ? saved.status !== 'VOID' : saved.status !== 'DRAFT' && saved.status !== 'VOID') && !isCredit && can('sales:create');
+  const showClass = tracking.classes.length > 0, showProject = !receipt && tracking.projects.length > 0;
+  const customerProjects = tracking.projects.filter((p) => !contactId || p.customerId === contactId);
 
   return (
     <div className="-m-4 flex min-h-[calc(100vh-3.5rem)] flex-col bg-background sm:-m-6">
       {/* title bar */}
       <div className="flex items-center gap-3 border-b bg-card px-6 py-3">
         <h1 className="text-xl font-semibold">{title}{saved?.number ? <span className="ml-2 font-mono text-base text-muted-foreground">{saved.number}</span> : <span className="ml-2 text-base font-normal text-muted-foreground">{saved ? 'draft' : 'new'}</span>}</h1>
-        {state && <StatusPill row={{ state, status: { draft: 'Draft', void: 'Voided', paid: receipt ? 'Paid' : 'Paid', open: saved!.status === 'PARTIAL' ? 'Partially paid' : 'Open' }[state] }} />}
+        {state && <StatusPill row={{ state, status: estimate ? ESTIMATE_STATUS[saved!.status] : { draft: 'Draft', void: 'Voided', paid: 'Paid', open: saved!.status === 'PARTIAL' ? 'Partially paid' : 'Open', overdue: 'Overdue' }[state] }} />}
+        {saved?.lastSentAt && <span className="text-xs text-muted-foreground">Sent {saved.lastSentAt.slice(0, 10)}</span>}
         <button onClick={close} className="ml-auto rounded p-1.5 hover:bg-accent" aria-label="Close"><X className="h-5 w-5" /></button>
       </div>
 
       <div className="flex-1 space-y-6 p-6">
         <FormError message={err} />
+        {notice && <p role="status" className="rounded-md border border-primary/30 bg-accent px-3 py-2 text-sm">{notice}</p>}
+        {estimate && saved?.status === 'CLOSED' && saved.invoiceId && <p className="rounded-md border bg-card px-3 py-2 text-sm">Converted to an invoice. <Link className="font-medium text-primary hover:underline" href={`/c/${companyId}/sales/invoices/${saved.invoiceId}`}>Open the invoice</Link></p>}
         {/* customer block + amount */}
         <div className="flex flex-wrap items-start gap-6">
           <div className="grid flex-1 gap-4 sm:grid-cols-2 lg:max-w-2xl">
@@ -206,8 +242,8 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
             <label className="block space-y-1.5 text-sm"><span className="font-medium">Customer email</span><Input disabled value={customer?.email ?? ''} placeholder="(none on file)" readOnly /></label>
           </div>
           <div className="ml-auto text-right">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{receipt ? 'Amount' : isCredit ? 'Credit amount' : 'Balance due'}</div>
-            <div className="text-4xl font-semibold tabular-nums">{money(receipt || isCredit ? totalC : balanceC)}</div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{receipt || estimate ? 'Amount' : isCredit ? 'Credit amount' : 'Balance due'}</div>
+            <div className="text-4xl font-semibold tabular-nums">{money(receipt || isCredit || estimate ? totalC : balanceC)}</div>
           </div>
         </div>
 
@@ -221,6 +257,12 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
               <label className="block space-y-1.5 text-sm"><span className="font-medium">Reference no.</span><Input disabled={ro} value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} /></label>
               <label className="block space-y-1.5 text-sm"><span className="font-medium">Deposit to</span><Select disabled={ro} value={depositId || depositAccounts[0]?.id || ''} onChange={(e) => setDepositId(e.target.value)}>{depositAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} · {a.name}</option>)}</Select></label>
             </>
+          ) : estimate ? (
+            <>
+              <label className="block space-y-1.5 text-sm"><span className="font-medium">Estimate date</span><Input type="date" disabled={ro} value={issueDate} onChange={(e) => setIssueDate(e.target.value)} /></label>
+              <label className="block space-y-1.5 text-sm"><span className="font-medium">Expiration date</span><Input type="date" disabled={ro} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} /></label>
+              {saved?.acceptedBy && <label className="block space-y-1.5 text-sm"><span className="font-medium">Accepted by</span><Input disabled value={saved.acceptedBy} readOnly /></label>}
+            </>
           ) : (
             <>
               {!isCredit && <label className="block space-y-1.5 text-sm"><span className="font-medium">Terms</span><Select disabled={ro} value={terms} onChange={(e) => pickTerms(e.target.value)}><option value="">None</option>{TERMS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</Select></label>}
@@ -228,6 +270,7 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
               {!isCredit && <label className="block space-y-1.5 text-sm"><span className="font-medium">Due date</span><Input type="date" disabled={ro} value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></label>}
             </>
           )}
+          {tracking.locations.length > 0 && <label className="block space-y-1.5 text-sm"><span className="font-medium">Location</span><Select disabled={ro} value={locationId} onChange={(e) => setLocationId(e.target.value)}><option value="">None</option>{tracking.locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</Select></label>}
           <label className="block space-y-1.5 text-sm"><span className="font-medium">Amounts are</span><Select disabled={ro} value={inclusive ? 'in' : 'ex'} onChange={(e) => setInclusive(e.target.value === 'in')}><option value="ex">Exclusive of tax</option><option value="in">Inclusive of tax</option></Select></label>
         </div>
 
@@ -235,7 +278,7 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
         <div className="overflow-x-auto rounded-md border bg-card shadow-sm">
           <table className="w-full min-w-[56rem] text-sm">
             <thead className="border-b bg-muted/60 text-left text-xs uppercase tracking-wide text-muted-foreground">
-              <tr><th className="w-8 px-2 py-2.5">#</th><th className="w-36 px-2 py-2.5">Service date</th><th className="w-56 px-2 py-2.5">Product/service</th><th className="px-2 py-2.5">Description</th><th className="w-20 px-2 py-2.5 text-right">Qty</th><th className="w-28 px-2 py-2.5 text-right">Rate</th><th className="w-28 px-2 py-2.5 text-right">Amount</th><th className="w-36 px-2 py-2.5">Sales tax</th><th className="w-8" /></tr>
+              <tr><th className="w-8 px-2 py-2.5">#</th><th className="w-36 px-2 py-2.5">Service date</th><th className="w-56 px-2 py-2.5">Product/service</th><th className="px-2 py-2.5">Description</th><th className="w-20 px-2 py-2.5 text-right">Qty</th><th className="w-28 px-2 py-2.5 text-right">Rate</th><th className="w-28 px-2 py-2.5 text-right">Amount</th><th className="w-36 px-2 py-2.5">Sales tax</th>{showClass && <th className="w-36 px-2 py-2.5">Class</th>}{showProject && <th className="w-40 px-2 py-2.5">Project</th>}<th className="w-8" /></tr>
             </thead>
             <tbody>
               {lines.map((l, i) => {
@@ -255,7 +298,9 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
                     <td className="px-2 py-1.5"><Input aria-label={`Quantity, line ${i + 1}`} inputMode="decimal" disabled={ro} value={l.quantity} onChange={(e) => setLine(l.key, { quantity: e.target.value })} className="h-8 text-right" /></td>
                     <td className="px-2 py-1.5"><Input aria-label={`Rate, line ${i + 1}`} inputMode="decimal" disabled={ro} value={l.rate} onChange={(e) => setLine(l.key, { rate: e.target.value })} className="h-8 text-right" /></td>
                     <td className="px-2 py-2 text-right tabular-nums">{amt ? money(amt) : ''}</td>
-                    <td className="px-2 py-1.5"><Select aria-label={`Sales tax, line ${i + 1}`} disabled={ro} value={l.taxCodeId} onChange={(e) => setLine(l.key, { taxCodeId: e.target.value })} className="h-8">{(taxCodes ?? []).map((t) => <option key={t.id} value={t.id}>{t.code}</option>)}</Select></td>
+                    <td className="px-2 py-1.5"><Select aria-label={`Sales tax, line ${i + 1}`} disabled={ro} value={l.taxCodeId} onChange={(e) => setLine(l.key, { taxCodeId: e.target.value })} className="h-8">{(taxCodes ?? []).map((t) => <option key={t.id} value={t.id}>{t.code}</option>)}</Select>{l.sourceRef && <span className="mt-1 block text-[11px] text-muted-foreground">Billable {l.sourceRef.type === 'time' ? 'time' : 'cost'}</span>}</td>
+                    {showClass && <td className="px-2 py-1.5"><Select aria-label={`Class, line ${i + 1}`} disabled={ro} value={l.classId} onChange={(e) => setLine(l.key, { classId: e.target.value })} className="h-8"><option value="" />{tracking.classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></td>}
+                    {showProject && <td className="px-2 py-1.5"><Select aria-label={`Project, line ${i + 1}`} disabled={ro} value={l.projectId} onChange={(e) => setLine(l.key, { projectId: e.target.value })} className="h-8"><option value="" />{customerProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</Select></td>}
                     <td className="px-1 py-1.5">{!ro && <button type="button" aria-label={`Delete line ${i + 1}`} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== l.key) : [blank(defaultTax)]))}><Trash2 className="h-4 w-4" /></button>}</td>
                   </tr>
                 );
@@ -267,20 +312,21 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
           <div className="flex gap-2">
             <Button type="button" variant="outline" size="sm" onClick={() => setLines((ls) => [...ls, blank(defaultTax)])}>Add lines</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => setLines([blank(defaultTax), blank(defaultTax)])}>Clear all lines</Button>
+            {kind === 'invoice' && !isCredit && contactId && <Button type="button" variant="outline" size="sm" onClick={() => setDialog('billables')}>Add billable time and costs</Button>}
           </div>
         )}
 
         {/* message, memo, totals */}
         <div className="flex flex-wrap gap-8">
           <div className="flex-1 space-y-4 lg:max-w-xl">
-            <label className="block space-y-1.5 text-sm"><span className="font-medium">{receipt ? 'Message displayed on sales receipt' : isCredit ? 'Message displayed on credit note' : 'Message displayed on invoice'}</span><textarea rows={3} disabled={ro} className={areaCls} value={message} onChange={(e) => setMessage(e.target.value)} /></label>
+            <label className="block space-y-1.5 text-sm"><span className="font-medium">{receipt ? 'Message displayed on sales receipt' : estimate ? 'Message displayed on estimate' : isCredit ? 'Message displayed on credit note' : 'Message displayed on invoice'}</span><textarea rows={3} disabled={ro} className={areaCls} value={message} onChange={(e) => setMessage(e.target.value)} /></label>
             <label className="block space-y-1.5 text-sm"><span className="font-medium">Memo (internal, not printed)</span><textarea rows={2} disabled={ro} className={areaCls} value={memo} onChange={(e) => setMemo(e.target.value)} /></label>
           </div>
           <dl className="ml-auto w-full max-w-sm space-y-2 text-sm">
             <div className="flex justify-between"><dt>Subtotal</dt><dd className="tabular-nums">{money(showSaved ? cents(saved!.subtotal) : est.sub)}</dd></div>
             {(showSaved ? savedTaxes : est.tax).map(([label, v]) => <div key={label} className="flex justify-between text-muted-foreground"><dt>{label}</dt><dd className="tabular-nums">{money(v)}</dd></div>)}
             <div className="flex justify-between border-t pt-2 text-base font-semibold"><dt>Total</dt><dd className="tabular-nums">{money(totalC)}</dd></div>
-            {showSaved && !receipt && !isCredit && <>
+            {showSaved && !receipt && !isCredit && !estimate && <>
               <div className="flex justify-between"><dt>Payments received</dt><dd className="tabular-nums">{fmtMoney(saved!.amountPaid ?? '0')}</dd></div>
               <div className="flex justify-between text-base font-semibold"><dt>Balance due</dt><dd className="tabular-nums">{money(balanceC)}</dd></div>
             </>}
@@ -292,18 +338,50 @@ export function SalesForm({ kind, id, presetCustomer }: { kind: FormKind; id?: s
       {/* action bar */}
       <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t bg-sidebar px-6 py-3 text-sidebar-foreground">
         <Button variant="ghost" className="text-sidebar-foreground hover:bg-white/10 hover:text-white" onClick={close}>{ro ? 'Close' : 'Cancel'}</Button>
-        {saved && can('sales:reverse') && saved.status !== 'VOID' && (saved.status === 'DRAFT' || saved.status === 'POSTED' || receipt) && (
+        {saved && can('sales:reverse') && saved.status !== 'VOID' && (estimate ? saved.status !== 'CLOSED' : saved.status === 'DRAFT' || saved.status === 'POSTED' || receipt) && (
           <Button variant="ghost" className="text-sidebar-foreground hover:bg-white/10 hover:text-white" onClick={() => void voidDoc()}>{saved.status === 'DRAFT' ? 'Delete' : 'Void'}</Button>
         )}
-        {pdf && <a href={pdf} target="_blank" rel="noreferrer" className="mx-auto inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-white/10 hover:text-white"><Printer className="h-4 w-4" aria-hidden /> Print or download</a>}
+        {kind === 'invoice' && !isCredit && saved && can('sales:create') && <Button variant="ghost" className="text-sidebar-foreground hover:bg-white/10 hover:text-white" onClick={() => setDialog('recurring')}><Repeat className="h-4 w-4" aria-hidden /> Make recurring</Button>}
+        <div className="mx-auto flex items-center gap-1">
+          {pdf && <a href={pdf} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-white/10 hover:text-white"><Printer className="h-4 w-4" aria-hidden /> Print or download</a>}
+          {sendable && <button type="button" onClick={() => setDialog('send')} className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-white/10 hover:text-white"><Mail className="h-4 w-4" aria-hidden /> Send</button>}
+          {sendable && kind === 'invoice' && balanceC > 0 && ['POSTED', 'PARTIAL'].includes(saved!.status) && saved!.dueDate!.slice(0, 10) < today() && <button type="button" onClick={() => setDialog('remind')} className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-white/10 hover:text-white">Send reminder</button>}
+        </div>
         <div className="ml-auto flex gap-2">
-          {ro && !receipt && !isCredit && saved && ['POSTED', 'PARTIAL'].includes(saved.status) && can('sales:post') && <Button onClick={() => setPaying(true)}>Receive payment</Button>}
-          {!ro && <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={busy} onClick={() => void save(false)}>Save draft</Button>}
-          {!ro && can('sales:post') && <Button disabled={busy} onClick={() => void save(true)}>{busy ? 'Saving…' : receipt ? 'Save and record' : 'Save and post'}</Button>}
-          {ro && <Link href={`/c/${companyId}/sales/${receipt ? 'receipts' : 'invoices'}/new`} className={cn('inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90')}>New {receipt ? 'sales receipt' : 'invoice'}</Link>}
+          {ro && kind === 'invoice' && !isCredit && saved && ['POSTED', 'PARTIAL'].includes(saved.status) && can('sales:post') && <Button onClick={() => setPaying(true)}>Receive payment</Button>}
+          {estimate && saved && ['PENDING', 'DECLINED'].includes(saved.status) && can('sales:create') && <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={() => { const who = window.prompt('Accepted by (name, optional)') ?? undefined; void act(() => api(`${base}/estimates/${saved.id}/decision`, { method: 'POST', body: { status: 'ACCEPTED', ...(who ? { acceptedBy: who } : {}) } }), 'Marked as accepted.'); }}>Mark accepted</Button>}
+          {estimate && saved?.status === 'PENDING' && can('sales:create') && <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={() => void act(() => api(`${base}/estimates/${saved.id}/decision`, { method: 'POST', body: { status: 'DECLINED' } }), 'Marked as declined.')}>Mark declined</Button>}
+          {estimate && saved && ['PENDING', 'ACCEPTED'].includes(saved.status) && can('sales:create') && <Button onClick={() => void (async () => { try { const inv = await api<{ id: string }>(`${base}/estimates/${saved.id}/convert`, { method: 'POST', body: {} }); router.push(`/c/${companyId}/sales/invoices/${inv.id}`); } catch (x) { setErr(errorMessage(x)); } })()}>Convert to invoice</Button>}
+          {!ro && !estimate && <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" disabled={busy} onClick={() => void save(false)}>Save draft</Button>}
+          {!ro && estimate && <Button disabled={busy} onClick={() => void save(false)}>{busy ? 'Saving…' : 'Save'}</Button>}
+          {!ro && !estimate && can('sales:post') && <Button disabled={busy} onClick={() => void save(true)}>{busy ? 'Saving…' : receipt ? 'Save and record' : 'Save and post'}</Button>}
+          {ro && <Link href={`${listHref}/new`} className={cn('inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90')}>New {receipt ? 'sales receipt' : estimate ? 'estimate' : 'invoice'}</Link>}
         </div>
       </div>
       {paying && saved && <ReceivePayment row={{ id: saved.id, contactId: saved.contactId, number: saved.number, customer: saved.contact.name, balance: ((cents(saved.total) - cents(saved.amountPaid ?? '0')) / 100).toFixed(2) }} onClose={(done) => { setPaying(false); if (done) void reload(); }} />}
+      {(dialog === 'send' || dialog === 'remind') && saved && <SendDialog path={`${base}/${path}/${saved.id}`} action={dialog} title={dialog === 'remind' ? `Send a reminder for ${saved.number}` : `Send ${title.toLowerCase()} ${saved.number ?? ''}`} onClose={(sent) => { setDialog(null); if (sent) void act(async () => undefined, dialog === 'remind' ? 'Reminder sent.' : 'Sent.'); }} />}
+      {dialog === 'recurring' && saved && <RecurringDialog companyId={companyId} kind="INVOICE" payload={recurringPayload()} defaultName={`${saved.contact.name} – monthly`} onClose={(ok) => { setDialog(null); if (ok) setNotice('Recurring schedule saved. Manage it under Sales → Recurring.'); }} />}
+      {dialog === 'billables' && <BillablesPanel companyId={companyId} contactId={contactId} taken={lines.map((l) => l.sourceRef?.id).filter((x): x is string => !!x)} onClose={(picked) => { setDialog(null); if (picked.length) addBillables(picked); }} />}
     </div>
+  );
+}
+
+/** Unbilled billable time and costs for the customer; ticked ones become invoice lines. */
+function BillablesPanel({ companyId, contactId, taken, onClose }: { companyId: string; contactId: string; taken: string[]; onClose: (picked: Billable[]) => void }) {
+  const { data } = useApi<Billable[]>(`/companies/${companyId}/customers/${contactId}/billables`);
+  const rows = (data ?? []).filter((b) => !taken.includes(b.id));
+  const [pick, setPick] = useState<Set<string>>(new Set());
+  return (
+    <SidePanel title="Add billable time and costs" onClose={() => onClose([])} footer={<><Button variant="outline" onClick={() => onClose([])}>Cancel</Button><Button disabled={!pick.size} onClick={() => onClose(rows.filter((r) => pick.has(r.id)))}>Add {pick.size || ''} to invoice</Button></>}>
+      {data && rows.length === 0 && <p className="text-sm text-muted-foreground">Nothing billable for this customer: time marked billable and costs on bills or expenses marked billable to them appear here.</p>}
+      <ul className="divide-y rounded-md border">
+        {rows.map((b) => (
+          <li key={b.id}><label className="flex cursor-pointer items-start gap-3 px-3 py-2 text-sm hover:bg-accent/50">
+            <input type="checkbox" className="mt-1" checked={pick.has(b.id)} onChange={(e) => setPick((s) => { const n = new Set(s); if (e.target.checked) n.add(b.id); else n.delete(b.id); return n; })} />
+            <span className="flex-1"><span className="block">{b.description}</span><span className="text-xs text-muted-foreground">{b.date} · {b.type === 'time' ? `${b.quantity} h` : 'cost'}{b.rate ? ` · ${fmtMoney(b.rate)}` : ''}</span></span>
+          </label></li>
+        ))}
+      </ul>
+    </SidePanel>
   );
 }

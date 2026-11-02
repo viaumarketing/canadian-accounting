@@ -41,6 +41,7 @@ describe('e-mailing documents (Resend)', () => {
     const inv = await postedInvoice(root, co);
     const pre = (await root.get(`/companies/${co.id}/invoices/${inv.id}/email`).expect(200)).body;
     expect(pre).toMatchObject({ to: ['ap@maple.example'], subject: 'Invoice INV-0001 — $113.00', mailConfigured: true });
+    expect(pre.body).toContain('Pay here: {{link}}'); // filled in when sent
 
     const row = (await root.post(`/companies/${co.id}/invoices/${inv.id}/send`, { to: ['AP@maple.example'], cc: ['owner@maple.example', 'ap@maple.example'] }).expect(201)).body;
     expect(row).toMatchObject({ status: 'SENT', providerId: 'email_1', kind: 'invoice', to: ['ap@maple.example'], cc: ['owner@maple.example'] });
@@ -58,13 +59,18 @@ describe('e-mailing documents (Resend)', () => {
     expect(req.body.html).toContain(`href="${ORIGIN}/i/${stored.payToken}"`);
     expect(req.body.html).not.toContain('<Billing>');
 
+    // the Send dialog posts the previewed body back, placeholder included: the link is filled in
+    await root.post(`/companies/${co.id}/invoices/${inv.id}/send`, { to: ['ap@maple.example'], body: pre.body }).expect(201);
+    expect(mail.sent[1].body.text).toContain(`Pay here: ${ORIGIN}/i/${stored.payToken}`);
+    expect(mail.sent[1].body.text).not.toContain('{{');
+
     // the provider refuses: nothing pretends it was sent
     mail.failNext(422, 'The domain is not verified');
     const bad = (await root.post(`/companies/${co.id}/invoices/${inv.id}/send`, { to: ['ap@maple.example'] }).expect(502)).body;
     expect(bad).toMatchObject({ code: 'MAIL_FAILED' });
     expect(bad.message).toContain('The domain is not verified');
     const log = (await root.get(`/companies/${co.id}/emails?documentId=${inv.id}`).expect(200)).body;
-    expect(log.map((l: { status: string }) => l.status)).toEqual(['FAILED', 'SENT']);
+    expect(log.map((l: { status: string }) => l.status)).toEqual(['FAILED', 'SENT', 'SENT']);
   });
 
   it('sends a sales receipt, and another company cannot send or read this company\'s documents', async () => {

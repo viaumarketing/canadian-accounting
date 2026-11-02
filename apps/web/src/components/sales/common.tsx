@@ -25,7 +25,7 @@ export function SalesHeader({ title, actions }: { title: string; actions?: React
   const pathname = usePathname();
   const router = useRouter();
   const base = `/c/${companyId}/sales`;
-  const tabs = [['All sales', base], ['Invoices', `${base}/invoices`], ['Sales receipts', `${base}/receipts`], ['Customers', `${base}/customers`], ['Products & services', `${base}/products`]] as const;
+  const tabs = [['All sales', base], ['Invoices', `${base}/invoices`], ['Estimates', `${base}/estimates`], ['Sales receipts', `${base}/receipts`], ['Recurring', `${base}/recurring`], ['Customers', `${base}/customers`], ['Products & services', `${base}/products`]] as const;
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -38,6 +38,7 @@ export function SalesHeader({ title, actions }: { title: string; actions?: React
               <Menu>
                 <MenuTrigger asChild><Button className="rounded-l-none border-l border-primary-foreground/30 px-2" aria-label="More new sales transactions"><ChevronDown className="h-4 w-4" /></Button></MenuTrigger>
                 <MenuContent align="end">
+                  <MenuItem onSelect={() => router.push(`${base}/estimates/new`)}>Estimate</MenuItem>
                   <MenuItem onSelect={() => router.push(`${base}/receipts/new`)}>Sales receipt</MenuItem>
                   <MenuItem onSelect={() => router.push(`${base}/invoices/new?kind=credit`)}>Credit note</MenuItem>
                   <MenuItem onSelect={() => router.push(`${base}/invoices?status=open`)}>Receive payment</MenuItem>

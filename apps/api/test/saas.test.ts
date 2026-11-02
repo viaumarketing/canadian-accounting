@@ -33,7 +33,8 @@ describe('SaaS edition', () => {
   it('publishes its mode and plans (prices stay in Stripe)', async () => {
     const c = (await agent(app).get('/config').expect(200)).body;
     expect(c).toMatchObject({ mode: 'saas', trialDays: 30, signup: true });
-    expect(c.plans.map((p: { id: string; maxUsers: number; available: boolean }) => [p.id, p.maxUsers, p.available])).toEqual([['starter', 1, true], ['essentials', 3, true], ['plus', 5, true]]);
+    expect(c.plans.map((p: { id: string; maxUsers: number; available: boolean; price: { amount: number } }) => [p.id, p.maxUsers, p.available, p.price.amount])).toEqual([['starter', 1, true, 1500], ['essentials', 3, true, 3000], ['plus', 5, true, 5500]]);
+    expect(c.plans[0].price).toEqual({ amount: 1500, currency: 'cad', interval: 'month' });
   });
 
   it('signs up, requires the e-mail to be confirmed, and does not reveal existing addresses', async () => {

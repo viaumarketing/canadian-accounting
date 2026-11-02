@@ -230,6 +230,7 @@ POST   /webhooks/shopify  ->  PUBLIC
 POST   /webhooks/stripe-billing  ->  PUBLIC
 POST   /webhooks/stripe/:accountId  ->  PUBLIC
 PUT    /companies/:companyId/banking/rules/:id  ->  banking:create
+PUT    /companies/:companyId/bills/:id  ->  purchases:create
 PUT    /companies/:companyId/branding  ->  settings:create
 PUT    /companies/:companyId/budgets/:id  ->  accounts:create
 PUT    /companies/:companyId/classes/:id  ->  settings:create

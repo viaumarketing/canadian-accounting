@@ -33,6 +33,8 @@ export class BillingController {
   bill(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string) { return this.billing.getBill(c, id); }
   @RequirePermission('purchases:create') @Post('bills')
   createBill(@Param('companyId') c: string, @Body(new ZodPipe(createBillSchema)) b: z.infer<typeof createBillSchema>, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.billing.createBill(c, b, u.id, ip); }
+  @RequirePermission('purchases:create') @Put('bills/:id')
+  updateBill(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @Body(new ZodPipe(createBillSchema)) b: z.infer<typeof createBillSchema>, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.billing.updateBill(c, id, b, u.id, ip); }
   @RequirePermission('purchases:post') @Post('bills/:id/post')
   postBill(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.billing.postBill(c, id, u.id, ip); }
   @RequirePermission('purchases:reverse') @Post('bills/:id/void')

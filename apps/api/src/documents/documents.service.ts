@@ -172,11 +172,13 @@ export class DocumentsService {
   }
 
   /** Wording for an e-mail: the company's template for this kind, or the default. */
-  emailText(template: DocumentTemplate, kind: EmailKind, vars: EmailVars, override?: { subject?: string; body?: string }) {
+  emailText(template: DocumentTemplate, kind: EmailKind, vars: EmailVars, override?: { subject?: string; body?: string }, opts: { keepLinkPlaceholder?: boolean } = {}) {
     const t = template.emails?.[kind] ?? DEFAULT_EMAILS[kind];
-    const subject = fill(override?.subject || t.subject || DEFAULT_EMAILS[kind].subject, vars);
-    // A body without a link placeholder loses the "View online" line rather than printing an empty URL.
-    const body = fill(override?.body || t.body || DEFAULT_EMAILS[kind].body, vars).replace(/^.*\{\{link\}\}.*$\n?/gm, '').replace(/\n{3,}/g, '\n\n');
+    const v = { ...vars, link: vars.link || undefined };
+    const subject = fill(override?.subject || t.subject || DEFAULT_EMAILS[kind].subject, v);
+    let body = fill(override?.body || t.body || DEFAULT_EMAILS[kind].body, v);
+    // With no link to give (receipts, statements), the line that would carry it is dropped rather than printed with an empty URL.
+    if (!opts.keepLinkPlaceholder) body = body.replace(/^.*\{\{link\}\}.*$\n?/gm, '').replace(/\n{3,}/g, '\n\n');
     return { subject, body };
   }
 
@@ -210,7 +212,8 @@ export class DocumentsService {
   /** What the Send dialog shows before sending: recipient, subject and body with placeholders filled in. */
   async preview(companyId: string, type: DocType, id: string) {
     const l = await this.load(companyId, type, id);
-    const text = this.emailText(l.h.template, l.kind, { ...l.vars, link: l.vars.link || (type === 'invoice' ? '(a link is created when the invoice is sent)' : '') });
+    // Before the first send an invoice has no customer link yet: the placeholder stays, and is filled in when it is sent.
+    const text = this.emailText(l.h.template, l.kind, l.vars, undefined, { keepLinkPlaceholder: type === 'invoice' });
     return { to: l.contactEmail ? [l.contactEmail] : [], ...text, mailConfigured: this.mail.configured };
   }
 

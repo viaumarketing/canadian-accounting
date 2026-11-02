@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Field, FormError, Input, Select } from '@/components/ui/form';
 import { SalesHeader, SidePanel } from '@/components/sales/common';
+import { StatementPanel } from '@/components/sales/statement-panel';
 import { api, errorMessage } from '@/lib/api';
 import { fmtMoney, useCompany } from '@/lib/company';
 import { useApi } from '@/lib/use-api';
@@ -22,6 +23,7 @@ function Customers() {
   const [err, setErr] = useState<string | null>(null);
   const [q, setQ] = useState('');
   useEffect(() => { if (params.get('new') === '1' && can('sales:create')) open('new'); }, []);
+  const [statementFor, setStatementFor] = useState<Customer | null>(null);
   function open(c: Customer | 'new') {
     setErr(null); setEdit(c);
     setF(c === 'new' ? empty : { name: c.name, email: c.email ?? '', phone: c.phone ?? '', billingAddress: c.billingAddress ?? '', province: c.province ?? '', defaultTerms: c.defaultTerms ?? '' });
@@ -56,6 +58,7 @@ function Customers() {
                 <td className="px-3 py-2.5 text-right">
                   <div className="inline-flex gap-3 text-xs font-medium">
                     {can('sales:create') && <a className="text-primary hover:underline" href={`/c/${companyId}/sales/invoices/new?customer=${c.id}`}>Create invoice</a>}
+                    <button className="text-primary hover:underline" onClick={() => setStatementFor(c)}>Statement</button>
                     {can('sales:create') && <button className="text-primary hover:underline" onClick={() => open(c)}>Edit</button>}
                   </div>
                 </td>
@@ -79,6 +82,7 @@ function Customers() {
           </div>
         </SidePanel>
       )}
+      {statementFor && <StatementPanel companyId={companyId} customer={statementFor} onClose={() => setStatementFor(null)} />}
     </div>
   );
 }

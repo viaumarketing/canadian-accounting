@@ -56,6 +56,8 @@ export function fakeStripe() {
       sessions.push({ auth, form: new URLSearchParams(String(init.body)), id });
       return new Response(JSON.stringify({ id, object: 'checkout.session', url: `https://checkout.stripe.com/c/pay/${id}`, status: 'open', payment_status: 'unpaid' }), { status: 200 });
     }
+    const price = /^https:\/\/api\.stripe\.com\/v1\/prices\/(price_\w+)$/.exec(url);
+    if (price && init.method === 'GET') return new Response(JSON.stringify({ id: price[1], object: 'price', unit_amount: { price_starter: 1500, price_essentials: 3000, price_plus: 5500 }[price[1]] ?? null, currency: 'cad', recurring: { interval: 'month', interval_count: 1 } }), { status: 200 });
     if (url === 'https://api.stripe.com/v1/billing_portal/sessions' && init.method === 'POST') {
       portals.push({ auth, form: new URLSearchParams(String(init.body)) });
       return new Response(JSON.stringify({ id: 'bps_1', object: 'billing_portal.session', url: 'https://billing.stripe.com/p/session/test_1' }), { status: 200 });

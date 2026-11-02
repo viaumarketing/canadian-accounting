@@ -3,7 +3,7 @@ import { CheckCircle2, Circle, Clock } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect } from 'react';
-import { TrendChart } from '@/components/trend-chart';
+import { DashboardCharts } from '@/components/dashboard-charts';
 import { Badge, Card, CardContent, CardHeader, CardTitle, Skeleton } from '@/components/ui/card';
 import { errorMessage } from '@/lib/api';
 import { useApi } from '@/lib/use-api';
@@ -77,12 +77,10 @@ export default function DashboardPage() {
         ))}
       </section>
 
+      {data.financials && <DashboardCharts companyId={companyId} />}
+
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader><CardTitle>Revenue vs. expenses</CardTitle></CardHeader>
-          <CardContent><TrendChart data={[]} emptyText="Trend charts arrive with the reporting milestone." /></CardContent>
-        </Card>
-        <Card>
+        <Card className="lg:col-span-3">
           <CardHeader><CardTitle>Getting started</CardTitle></CardHeader>
           <CardContent>
             <ul className="space-y-3 text-sm">

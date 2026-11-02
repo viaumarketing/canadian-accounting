@@ -28,6 +28,7 @@ export default function LoginPage() {
       router.replace('/');
     } catch (err) {
       if (err instanceof ApiError && err.code === 'MFA_REQUIRED') setNeedsMfa(true);
+      else if (err instanceof ApiError && err.code === 'EMAIL_NOT_VERIFIED') { setError(errorMessage(err)); void api('/signup/resend', { method: 'POST', body: { email } }).catch(() => undefined); }
       else setError(errorMessage(err));
     } finally {
       setBusy(false);

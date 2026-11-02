@@ -1,7 +1,7 @@
 'use client';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as M from '@radix-ui/react-dropdown-menu';
-import { Building2, Check, ChevronDown, ChevronsUpDown, LogOut, Menu as MenuIcon, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings, ShieldCheck, Sun } from 'lucide-react';
+import { Building2, Check, ChevronDown, ChevronsUpDown, CreditCard, LogOut, Menu as MenuIcon, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings, ShieldCheck, Sun } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -9,6 +9,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { roleHasPermission, type CompanyRole, type Permission } from '@ca/shared';
 import { NAV, sectionOf } from '@/lib/nav';
 import { useSession } from '@/lib/session';
+import { useApi } from '@/lib/use-api';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from '@/components/ui/menu';
@@ -72,17 +73,24 @@ const NEW_MENU: { group: string; items: { label: string; href: string; permissio
   { group: 'Customers', items: [
     { label: 'Invoice', href: 'sales/invoices/new', permission: 'sales:create' },
     { label: 'Receive payment', href: 'sales/invoices?status=open', permission: 'sales:post' },
+    { label: 'Estimate', href: 'sales/estimates/new', permission: 'sales:create' },
     { label: 'Sales receipt', href: 'sales/receipts/new', permission: 'sales:create' },
     { label: 'Credit note', href: 'sales/invoices/new?kind=credit', permission: 'sales:create' },
     { label: 'Customer', href: 'sales/customers?new=1', permission: 'sales:create' },
   ] },
   { group: 'Suppliers', items: [
     { label: 'Expense', href: 'expenses', permission: 'expenses:create' },
-    { label: 'Bill', href: 'purchases', permission: 'purchases:create' },
+    { label: 'Bill', href: 'purchases/new', permission: 'purchases:create' },
+    { label: 'Pay bills', href: 'purchases/pay', permission: 'purchases:post' },
+    { label: 'Purchase order', href: 'purchases/orders/new', permission: 'purchases:create' },
+    { label: 'Supplier credit', href: 'purchases/new?kind=credit', permission: 'purchases:create' },
     { label: 'Supplier', href: 'contacts', permission: 'purchases:create' },
   ] },
   { group: 'Other', items: [
+    { label: 'Bank deposit', href: 'deposits', permission: 'banking:post' },
     { label: 'Journal entry', href: 'accounting', permission: 'journal:create' },
+    { label: 'Inventory adjustment', href: 'inventory', permission: 'journal:post' },
+    { label: 'Time entry', href: 'time', permission: 'expenses:create' },
     { label: 'Bank statement import', href: 'banking', permission: 'banking:create' },
     { label: 'Product or service', href: 'sales/products?new=1', permission: 'sales:create' },
   ] },
@@ -175,6 +183,8 @@ function UserMenu() {
   const { me, signOut } = useSession();
   const router = useRouter();
   const initials = me.name.split(/\s+/).map((p) => p[0]).slice(0, 2).join('').toUpperCase();
+  const { data: cfg } = useApi<{ mode: string }>('/config');
+  const saas = cfg?.mode === 'saas';
   return (
     <Menu>
       <MenuTrigger asChild>
@@ -184,6 +194,11 @@ function UserMenu() {
       </MenuTrigger>
       <MenuContent align="end">
         <MenuLabel>{me.email}</MenuLabel>
+        {saas && (
+          <MenuItem onSelect={() => router.push('/billing')}>
+            <CreditCard className="h-4 w-4" aria-hidden /> Billing
+          </MenuItem>
+        )}
         {me.isSuperAdmin && (
           <MenuItem onSelect={() => router.push('/admin')}>
             <ShieldCheck className="h-4 w-4" aria-hidden /> System administration
@@ -262,8 +277,23 @@ export function Shell({ companyId, title, children }: { companyId: string | null
             <UserMenu />
           </div>
         </header>
-        <main className="mx-auto w-full max-w-[1400px] flex-1 p-4 sm:p-6">{children}</main>
+        <main className="mx-auto w-full max-w-[1400px] flex-1 p-4 sm:p-6"><SubscriptionBanner />{children}</main>
       </div>
+    </div>
+  );
+}
+
+/** SaaS edition, organization owners: trial ending soon, or books read-only because the subscription lapsed. */
+function SubscriptionBanner() {
+  const { data: cfg } = useApi<{ mode: string }>('/config');
+  const { data } = useApi<{ status: string; trialEndsAt: string | null; subscribed: boolean; writable: boolean }>(cfg?.mode === 'saas' ? '/billing' : null);
+  if (!data) return null;
+  const days = data.trialEndsAt ? Math.ceil((Date.parse(data.trialEndsAt) - Date.now()) / 86_400_000) : null;
+  if (data.writable && (data.subscribed || days === null || days > 7)) return null;
+  return (
+    <div role="status" className={cn('mb-4 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm', data.writable ? 'border-warning/40 bg-warning/10' : 'border-destructive/40 bg-destructive/10 text-destructive')}>
+      {data.writable ? `Your free trial ends in ${days} day${days === 1 ? '' : 's'}.` : 'Your subscription is not active: the books are read-only.'}
+      <a href="/billing" className="ml-auto font-medium underline">{data.writable ? 'Choose a plan' : 'Renew now'}</a>
     </div>
   );
 }

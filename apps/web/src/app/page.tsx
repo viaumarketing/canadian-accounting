@@ -20,7 +20,10 @@ export default function Home() {
       } catch (e) {
         if (e instanceof ApiError && e.code === 'PASSWORD_CHANGE_REQUIRED') return router.replace('/change-password');
         const s = await api<{ needsSetup: boolean }>('/setup/status').catch(() => null);
-        router.replace(s?.needsSetup ? '/setup' : '/login');
+        if (s?.needsSetup) return router.replace('/setup');
+        // SaaS edition: visitors who are not signed in see the public home page.
+        const c = await api<{ mode: string }>('/config').catch(() => null);
+        router.replace(c?.mode === 'saas' ? '/welcome' : '/login');
       }
     })();
   }, [router]);

@@ -6,6 +6,7 @@ import { Badge, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@/c
 import { Button } from '@/components/ui/button';
 import { Field, FormError, Input, Select } from '@/components/ui/form';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { BrandingTab, CollectionsTab, PaymentsTab, TrackingTab } from '@/components/settings/feature-tabs';
 import { api, errorMessage } from '@/lib/api';
 import { useSession } from '@/lib/session';
 import { useApi } from '@/lib/use-api';
@@ -219,12 +220,20 @@ export default function SettingsPage() {
           <TabsTrigger value="company">Company</TabsTrigger>
           {can('members:view') && <TabsTrigger value="members">Members</TabsTrigger>}
           {can('taxes:view') && <TabsTrigger value="tax">Tax registration</TabsTrigger>}
+          <TabsTrigger value="branding">Branding & e-mail</TabsTrigger>
+          {can('settings:create') && <TabsTrigger value="payments">Online payments</TabsTrigger>}
+          {can('sales:view') && <TabsTrigger value="collections">Reminders & late fees</TabsTrigger>}
+          <TabsTrigger value="tracking">Classes & locations</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
           {can('audit:view') && <TabsTrigger value="audit">Audit log</TabsTrigger>}
         </TabsList>
         <TabsContent value="company"><CompanyTab companyId={companyId} canEdit={can('settings:create')} /></TabsContent>
         {can('members:view') && <TabsContent value="members"><MembersTab companyId={companyId} canInvite={can('members:create')} myRole={role} /></TabsContent>}
         {can('taxes:view') && <TabsContent value="tax"><TaxTab companyId={companyId} canAdd={can('taxes:create')} /></TabsContent>}
+        <TabsContent value="branding"><BrandingTab companyId={companyId} canEdit={can('settings:create')} /></TabsContent>
+        {can('settings:create') && <TabsContent value="payments"><PaymentsTab companyId={companyId} /></TabsContent>}
+        {can('sales:view') && <TabsContent value="collections"><CollectionsTab companyId={companyId} canEdit={can('settings:create')} /></TabsContent>}
+        <TabsContent value="tracking"><TrackingTab companyId={companyId} canEdit={can('settings:create')} /></TabsContent>
         <TabsContent value="security"><SecurityTab /></TabsContent>
         {can('audit:view') && <TabsContent value="audit"><AuditTab companyId={companyId} /></TabsContent>}
       </Tabs>
