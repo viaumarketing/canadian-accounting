@@ -1,7 +1,7 @@
 # Canadian Accounting
 
 Self-hosted, multi-company accounting for Canadian businesses (double-entry ledger, GST/HST/QST/PST, Shopify, banking, reporting).
-Built milestone by milestone; **currently: Milestone 6 (Security, packaging, backup and recovery)**, on top of Reporting (5), Banking (4), Shopify (3), Accounting core (2) and Foundation (1). See `docs/milestone-1.md` … `docs/milestone-6.md` for what exists and what does not; setup guides: `docs/shopify-setup.md`, `docs/banking-setup.md`.
+Built milestone by milestone; **currently: Milestone 6 (Security, packaging, backup and recovery)**, on top of Reporting (5), Banking (4), Shopify (3), Accounting core (2) and Foundation (1). See `docs/milestone-1.md` … `docs/milestone-6.md`, then `docs/v0.9.1.md` (year-end close, Quick Method, operations) and `docs/v0.9.2.md` (QuickBooks Online–style interface, invoices, sales receipts, products & services) for what exists and what does not; setup guides: `docs/shopify-setup.md`, `docs/banking-setup.md`.
 
 | Path | What |
 | --- | --- |

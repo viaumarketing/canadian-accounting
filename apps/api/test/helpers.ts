@@ -30,6 +30,7 @@ export function agent(app: INestApplication) {
     get: (url: string) => a.get(url),
     post: (url: string, body?: object) => a.post(url).set('Origin', ORIGIN).send(body ?? {}),
     patch: (url: string, body?: object) => a.patch(url).set('Origin', ORIGIN).send(body ?? {}),
+    put: (url: string, body?: object) => a.put(url).set('Origin', ORIGIN).send(body ?? {}),
     delete: (url: string) => a.delete(url).set('Origin', ORIGIN),
   };
 }

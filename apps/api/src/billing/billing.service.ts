@@ -12,8 +12,12 @@ import { isoOf, toDate } from '../accounting/setup';
 type Tx = Prisma.TransactionClient;
 const D = (v: Decimal.Value | { toString(): string }) => new Decimal(v.toString());
 
-interface RawLine { description: string; quantity: string; unitPrice: string; accountId: string; taxCodeId: string }
+export interface RawLine { description: string; quantity: string; unitPrice: string; accountId: string; taxCodeId: string; itemId?: string; serviceDate?: string }
 type AccountType = 'ASSET' | 'LIABILITY' | 'EQUITY' | 'REVENUE' | 'EXPENSE';
+export interface InvoiceInput {
+  contactId: string; issueDate: string; dueDate: string; taxInclusive: boolean; kind: 'STANDARD' | 'CREDIT'; lines: RawLine[];
+  terms?: string; billingAddress?: string; message?: string; memo?: string;
+}
 
 @Injectable()
 export class BillingService {
@@ -22,7 +26,7 @@ export class BillingService {
   // ---------- shared helpers ----------
 
   /** Line accounts must belong to the company, be active, be the right type, and not be a control (role) account. */
-  private async checkAccounts(db: Tx | PrismaService, companyId: string, ids: string[], allowed: AccountType[]) {
+  async checkAccounts(db: Tx | PrismaService, companyId: string, ids: string[], allowed: AccountType[]) {
     const uniq = [...new Set(ids)];
     const rows = await db.account.findMany({ where: { companyId, id: { in: uniq } } });
     if (rows.length !== uniq.length) throw new BadRequestException({ code: 'INVALID_ACCOUNT', message: 'Unknown account on a line' });
@@ -33,13 +37,13 @@ export class BillingService {
     }
   }
 
-  private async checkContact(db: Tx | PrismaService, companyId: string, contactId: string, role: 'CUSTOMER' | 'VENDOR') {
+  async checkContact(db: Tx | PrismaService, companyId: string, contactId: string, role: 'CUSTOMER' | 'VENDOR') {
     const c = await db.contact.findFirst({ where: { id: contactId, companyId, isActive: true } });
     if (!c || (c.kind !== 'BOTH' && c.kind !== role)) throw new BadRequestException({ code: 'INVALID_CONTACT', message: `Contact must be an active ${role.toLowerCase()}` });
     return c;
   }
 
-  private async priceLines(db: Tx | PrismaService, companyId: string, date: string, inclusive: boolean, lines: RawLine[]) {
+  async priceLines(db: Tx | PrismaService, companyId: string, date: string, inclusive: boolean, lines: RawLine[]) {
     const amounts = lines.map((l) => money(D(l.quantity).times(l.unitPrice)));
     const taxes = await this.tax.compute(db, companyId, date, inclusive, lines.map((l, i) => ({ amount: amounts[i], taxCodeId: l.taxCodeId })));
     const priced = lines.map((l, i) => ({
@@ -51,7 +55,7 @@ export class BillingService {
     return { priced, subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2), total: subtotal.plus(taxTotal).toFixed(2) };
   }
 
-  private docLines(lines: { accountId: string; net: Prisma.Decimal; taxDetail: Prisma.JsonValue; description: string }[]): DocLine[] {
+  docLines(lines: { accountId: string; net: Prisma.Decimal; taxDetail: Prisma.JsonValue; description: string }[]): DocLine[] {
     return lines.map((l) => ({ accountId: l.accountId, net: D(l.net).toFixed(2), taxes: l.taxDetail as unknown as TaxLine[], memo: l.description }));
   }
 
@@ -62,20 +66,54 @@ export class BillingService {
     return `${this.prefix[type][kind === 'CREDIT' ? 1 : 0]}-${String(n).padStart(4, '0')}`;
   }
 
+  /** Product/service and service date on sales lines; the item must belong to the company and be active. */
+  async salesLineExtras(db: Tx | PrismaService, companyId: string, lines: RawLine[]) {
+    const ids = [...new Set(lines.map((l) => l.itemId).filter((x): x is string => !!x))];
+    if (ids.length) {
+      const n = await db.item.count({ where: { companyId, id: { in: ids }, isActive: true } });
+      if (n !== ids.length) throw new BadRequestException({ code: 'INVALID_ITEM', message: 'Unknown or inactive product/service on a line' });
+    }
+    return lines.map((l) => ({ itemId: l.itemId ?? null, serviceDate: l.serviceDate ? toDate(l.serviceDate) : null }));
+  }
+
   // ---------- invoices ----------
 
-  async createInvoice(companyId: string, i: { contactId: string; issueDate: string; dueDate: string; taxInclusive: boolean; kind: 'STANDARD' | 'CREDIT'; lines: RawLine[] }, actorId: string, ip: string | null) {
+  async createInvoice(companyId: string, i: InvoiceInput, actorId: string, ip: string | null) {
     return this.prisma.$transaction(async (tx) => {
-      await this.checkContact(tx, companyId, i.contactId, 'CUSTOMER');
-      await this.checkAccounts(tx, companyId, i.lines.map((l) => l.accountId), ['REVENUE']);
-      const p = await this.priceLines(tx, companyId, i.issueDate, i.taxInclusive, i.lines);
-      const inv = await tx.invoice.create({
-        data: { companyId, contactId: i.contactId, kind: i.kind, issueDate: toDate(i.issueDate), dueDate: toDate(i.dueDate), taxInclusive: i.taxInclusive, subtotal: p.subtotal, taxTotal: p.taxTotal, total: p.total, createdById: actorId, lines: { create: p.priced.map((l) => ({ ...l, companyId })) } },
-        include: { lines: true },
-      });
+      const data = await this.invoiceData(tx, companyId, i);
+      const inv = await tx.invoice.create({ data: { ...data, companyId, createdById: actorId }, include: { lines: true } });
       await this.audit.record({ action: 'invoice.created', companyId, actorId, entityType: 'Invoice', entityId: inv.id, ip }, tx);
       return inv;
     });
+  }
+
+  /** Drafts can be edited freely (lines are replaced); posted invoices are changed only by voiding. */
+  async updateInvoice(companyId: string, id: string, i: InvoiceInput, actorId: string, ip: string | null) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Invoice" WHERE id = ${id}::uuid AND "companyId" = ${companyId}::uuid FOR UPDATE`;
+      const cur = await tx.invoice.findFirst({ where: { id, companyId } });
+      if (!cur) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Invoice not found' });
+      if (cur.status !== 'DRAFT') throw new ConflictException({ code: 'NOT_DRAFT', message: 'Only draft invoices can be edited; void a posted invoice instead' });
+      const data = await this.invoiceData(tx, companyId, i);
+      await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
+      const inv = await tx.invoice.update({ where: { id }, data, include: { lines: true } });
+      await this.audit.record({ action: 'invoice.updated', companyId, actorId, entityType: 'Invoice', entityId: id, ip }, tx);
+      return inv;
+    });
+  }
+
+  private async invoiceData(tx: Tx, companyId: string, i: InvoiceInput) {
+    await this.checkContact(tx, companyId, i.contactId, 'CUSTOMER');
+    await this.checkAccounts(tx, companyId, i.lines.map((l) => l.accountId), ['REVENUE']);
+    if (i.dueDate < i.issueDate) throw new BadRequestException({ code: 'INVALID_DUE_DATE', message: 'The due date cannot be before the invoice date' });
+    const p = await this.priceLines(tx, companyId, i.issueDate, i.taxInclusive, i.lines);
+    const extras = await this.salesLineExtras(tx, companyId, i.lines);
+    return {
+      contactId: i.contactId, kind: i.kind, issueDate: toDate(i.issueDate), dueDate: toDate(i.dueDate), taxInclusive: i.taxInclusive,
+      terms: i.terms ?? null, billingAddress: i.billingAddress ?? null, message: i.message ?? null, memo: i.memo ?? null,
+      subtotal: p.subtotal, taxTotal: p.taxTotal, total: p.total,
+      lines: { create: p.priced.map((l, n) => ({ ...l, ...extras[n], companyId })) },
+    };
   }
 
   async postInvoice(companyId: string, id: string, actorId: string, ip: string | null) {

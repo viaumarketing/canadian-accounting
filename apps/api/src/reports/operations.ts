@@ -122,7 +122,7 @@ export async function revenueByChannel(c: Ctx, p: { from: string; to: string }):
     refundIds.length ? c.prisma.shopifyRefund.findMany({ where: { id: { in: refundIds } }, select: { id: true, store: { select: { shopDomain: true } } } }) : [],
   ]);
   const store = new Map<string, string>([...orders, ...refunds].map((x) => [x.id, x.store.shopDomain]));
-  const label = (x: (typeof eff)[number]) => x.st === 'shopify_order' || x.st === 'shopify_refund' ? `Shopify: ${store.get(x.sid ?? '') ?? 'store'}` : x.st === 'invoice' || x.st === 'credit_note' ? 'Invoices (direct sales)' : x.st === 'bank_txn' ? 'Bank deposits (categorised)' : x.st === 'manual' ? 'Manual journals' : 'Other';
+  const label = (x: (typeof eff)[number]) => x.st === 'shopify_order' || x.st === 'shopify_refund' ? `Shopify: ${store.get(x.sid ?? '') ?? 'store'}` : x.st === 'invoice' || x.st === 'credit_note' ? 'Invoices (direct sales)' : x.st === 'sales_receipt' ? 'Sales receipts (paid at the time of sale)' : x.st === 'bank_txn' ? 'Bank deposits (categorised)' : x.st === 'manual' ? 'Manual journals' : 'Other';
   const by = new Map<string, Decimal>();
   for (const x of eff) by.set(label(x), (by.get(label(x)) ?? D(0)).plus(x.amt));
   const total = [...by.values()].reduce((s, v) => s.plus(v), D(0));
