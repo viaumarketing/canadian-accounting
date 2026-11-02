@@ -1,4 +1,4 @@
-import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -179,6 +179,19 @@ describe('system status', () => {
     expect(stale.status).toBe('stale');
     expect(stale.latest.ageHours).toBeGreaterThan(48);
     expect(stale.note).toMatch(/older than 36 hours/);
+  });
+  it('reports the off-NAS backup copy: not configured, ok, failed, stale', async () => {
+    const root = await setupAdmin(app);
+    const copy = async () => (await root.get('/admin/system').expect(200)).body.backups.copy;
+    expect((await copy()).status).toBe('not_configured');
+    const write = (o: object) => writeFileSync(join(dir, 'copy-status.json'), JSON.stringify(o));
+    write({ at: new Date().toISOString(), status: 'ok', file: 'ca-x.sql.gz.enc', message: '' });
+    expect(await copy()).toMatchObject({ status: 'ok', file: 'ca-x.sql.gz.enc' });
+    write({ at: new Date().toISOString(), status: 'failed', file: 'ca-x.sql.gz.enc', message: 'copy folder is missing or not writable' });
+    expect(await copy()).toMatchObject({ status: 'failed', message: /not writable/ });
+    write({ at: new Date(Date.now() - 50 * 3_600_000).toISOString(), status: 'ok', file: 'ca-x.sql.gz.enc', message: '' });
+    expect(await copy()).toMatchObject({ status: 'stale', message: /older than 36 hours/ });
+    rmSync(join(dir, 'copy-status.json'));
   });
   it('lists security events from the audit trail', async () => {
     const root = await setupAdmin(app);

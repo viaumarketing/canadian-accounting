@@ -19,7 +19,12 @@ export interface PostParams {
   lines: LineInput[];
   actorId: string;
   ip?: string | null;
+  /** Year-end close/reopen only: post into periods that are locked (the close locks them itself). */
+  allowLockedPeriod?: boolean;
 }
+
+/** Journals created by year-end close and reopen. Income-statement figures leave them out (see reports/common.ts). */
+export const CLOSING_SOURCES = ['year_end_close', 'year_end_reopen'] as const;
 
 @Injectable()
 export class LedgerService {
@@ -62,7 +67,11 @@ export class LedgerService {
       period = await tx.accountingPeriod.findFirst({ where: { companyId: p.companyId, startDate: { lte: date }, endDate: { gte: date } } });
     }
     if (!period) throw new UnprocessableEntityException({ code: 'NO_PERIOD', message: `No fiscal year covers ${p.date}. Create the fiscal year first.` });
-    if (period.status === 'LOCKED') throw new UnprocessableEntityException({ code: 'PERIOD_LOCKED', message: `Accounting period ${period.label} is locked` });
+    if (!p.allowLockedPeriod) {
+      const fy = await tx.fiscalYear.findUnique({ where: { id: period.fiscalYearId }, select: { status: true, label: true } });
+      if (fy?.status === 'CLOSED') throw new UnprocessableEntityException({ code: 'YEAR_CLOSED', message: `Fiscal year ${fy.label} is closed. Reopen it to post into it.` });
+      if (period.status === 'LOCKED') throw new UnprocessableEntityException({ code: 'PERIOD_LOCKED', message: `Accounting period ${period.label} is locked` });
+    }
 
     const entry = await tx.journalEntry.create({
       data: {
@@ -97,9 +106,12 @@ export class LedgerService {
     }
   }
 
-  async updateAccount(companyId: string, id: string, input: { name?: string; description?: string | null; isActive?: boolean; parentId?: string | null }, actorId: string, ip: string | null) {
+  async updateAccount(companyId: string, id: string, input: { name?: string; description?: string | null; isActive?: boolean; parentId?: string | null; cashFlow?: 'OPERATING' | 'INVESTING' | 'FINANCING' | null }, actorId: string, ip: string | null) {
     const a = await this.prisma.account.findFirst({ where: { id, companyId } });
     if (!a) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Account not found' });
+    if (input.cashFlow !== undefined && (a.type === 'REVENUE' || a.type === 'EXPENSE')) {
+      throw new BadRequestException({ code: 'INVALID_CASH_FLOW', message: 'Revenue and expense accounts flow through net income; only balance-sheet accounts take a cash-flow section' });
+    }
     if (input.isActive === false && a.role) throw new ConflictException({ code: 'SYSTEM_ACCOUNT', message: 'System accounts cannot be deactivated' });
     if (input.parentId) {
       if (input.parentId === id) throw new BadRequestException({ code: 'INVALID_PARENT', message: 'An account cannot be its own parent' });
@@ -107,7 +119,7 @@ export class LedgerService {
       if (!parent || parent.type !== a.type) throw new BadRequestException({ code: 'INVALID_PARENT', message: 'Parent must exist and have the same type' });
     }
     const u = await this.prisma.account.update({ where: { id }, data: input });
-    await this.audit.record({ action: 'account.updated', companyId, actorId, entityType: 'Account', entityId: id, metadata: input as Prisma.InputJsonObject, ip });
+    await this.audit.record({ action: 'account.updated', companyId, actorId, entityType: 'Account', entityId: id, metadata: { ...input, ...(input.cashFlow !== undefined ? { cashFlowFrom: a.cashFlow } : {}) } as Prisma.InputJsonObject, ip });
     return u;
   }
 
@@ -135,9 +147,102 @@ export class LedgerService {
   async setPeriodLock(companyId: string, id: string, locked: boolean, actorId: string, ip: string | null) {
     const p = await this.prisma.accountingPeriod.findFirst({ where: { id, companyId } });
     if (!p) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Period not found' });
+    if (!locked && (await this.prisma.fiscalYear.findUnique({ where: { id: p.fiscalYearId } }))?.status === 'CLOSED') {
+      throw new ConflictException({ code: 'YEAR_CLOSED', message: 'This period belongs to a closed fiscal year. Reopen the year first.' });
+    }
     const u = await this.prisma.accountingPeriod.update({ where: { id }, data: { status: locked ? 'LOCKED' : 'OPEN' } });
     await this.audit.record({ action: locked ? 'period.locked' : 'period.unlocked', companyId, actorId, entityType: 'AccountingPeriod', entityId: id, metadata: { label: p.label }, ip });
     return u;
+  }
+
+  // ---------- year-end close ----------
+
+  async listFiscalYears(companyId: string) {
+    await this.prisma.$transaction((tx) => ensurePeriods(tx, companyId));
+    return this.prisma.fiscalYear.findMany({ where: { companyId }, orderBy: { startDate: 'asc' }, select: { id: true, label: true, startDate: true, endDate: true, status: true, closingEntryId: true, closedAt: true } });
+  }
+
+  /**
+   * What closing would post, and anything that prevents it. Revenue and expense balances of the year (closing/reopen
+   * entries excluded) are brought to zero against Retained Earnings, dated the last day of the year.
+   */
+  async closePreview(companyId: string, fiscalYearId: string, db: Tx | PrismaService = this.prisma) {
+    const fy = await db.fiscalYear.findFirst({ where: { id: fiscalYearId, companyId } });
+    if (!fy) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Fiscal year not found' });
+    const blockers: { code: string; message: string }[] = [];
+    if (fy.status === 'CLOSED') blockers.push({ code: 'ALREADY_CLOSED', message: `${fy.label} is already closed` });
+    const earlierOpen = await db.fiscalYear.findFirst({ where: { companyId, endDate: { lt: fy.startDate }, status: 'OPEN' }, orderBy: { startDate: 'asc' } });
+    if (earlierOpen) blockers.push({ code: 'EARLIER_YEAR_OPEN', message: `Close ${earlierOpen.label} first: years are closed in order` });
+    const drafts = await db.journalEntry.count({ where: { companyId, status: 'DRAFT', date: { gte: fy.startDate, lte: fy.endDate } } });
+    if (drafts) blockers.push({ code: 'DRAFTS_IN_YEAR', message: `${drafts} draft journal${drafts === 1 ? '' : 's'} dated in ${fy.label}: post or delete ${drafts === 1 ? 'it' : 'them'} first` });
+    const re = await db.account.findFirst({ where: { companyId, role: 'RETAINED_EARNINGS', isActive: true } });
+    if (!re) blockers.push({ code: 'NO_RETAINED_EARNINGS', message: 'No active Retained Earnings account (role RETAINED_EARNINGS)' });
+
+    const sums = await db.journalLine.groupBy({
+      by: ['accountId'],
+      where: { companyId, account: { type: { in: ['REVENUE', 'EXPENSE'] } }, entry: { status: 'POSTED', date: { gte: fy.startDate, lte: fy.endDate }, sourceType: { notIn: [...CLOSING_SOURCES] } } },
+      _sum: { debit: true, credit: true },
+    });
+    const accts = new Map((await db.account.findMany({ where: { companyId, id: { in: sums.map((x) => x.accountId) } }, select: { id: true, code: true, name: true, type: true, isActive: true } })).map((a) => [a.id, a]));
+    const lines: LineInput[] = [];
+    let netIncome = new Decimal(0); // credit-positive: revenue - expenses
+    for (const x of sums.sort((a, b) => accts.get(a.accountId)!.code.localeCompare(accts.get(b.accountId)!.code))) {
+      const bal = D(x._sum.debit ?? 0).minus(D(x._sum.credit ?? 0)); // debit-positive
+      if (bal.isZero()) continue;
+      netIncome = netIncome.minus(bal);
+      // Bring the account to zero: a debit balance is credited, a credit balance is debited.
+      lines.push(bal.isPositive() ? { accountId: x.accountId, debit: '0', credit: bal.toFixed(2), memo: 'Year-end close' } : { accountId: x.accountId, debit: bal.neg().toFixed(2), credit: '0', memo: 'Year-end close' });
+    }
+    if (lines.length && re) {
+      lines.push(netIncome.isNegative() ? { accountId: re.id, debit: netIncome.neg().toFixed(2), credit: '0', memo: 'Net loss for the year' } : { accountId: re.id, debit: '0', credit: netIncome.toFixed(2), memo: 'Net income for the year' });
+    }
+    const inactive = lines.filter((l) => accts.get(l.accountId) && !accts.get(l.accountId)!.isActive).map((l) => accts.get(l.accountId)!.code);
+    if (inactive.length) blockers.push({ code: 'INACTIVE_ACCOUNT', message: `Reactivate account${inactive.length === 1 ? '' : 's'} ${inactive.join(', ')} to close the year` });
+    return {
+      fiscalYear: { id: fy.id, label: fy.label, startDate: isoOf(fy.startDate), endDate: isoOf(fy.endDate), status: fy.status },
+      netIncome: netIncome.toFixed(2),
+      lines: lines.map((l) => ({ ...l, account: accts.get(l.accountId) ? { code: accts.get(l.accountId)!.code, name: accts.get(l.accountId)!.name } : { code: re?.code ?? '', name: re?.name ?? '' } })),
+      blockers,
+    };
+  }
+
+  /** Post the closing entry, lock every period of the year and mark it CLOSED, all in one transaction. */
+  async closeYear(companyId: string, fiscalYearId: string, actorId: string, ip: string | null) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "FiscalYear" WHERE id = ${fiscalYearId}::uuid AND "companyId" = ${companyId}::uuid FOR UPDATE`;
+      const pv = await this.closePreview(companyId, fiscalYearId, tx);
+      if (pv.blockers.length) throw new ConflictException({ code: pv.blockers[0].code, message: pv.blockers.map((b) => b.message).join('; '), errors: pv.blockers });
+      const entry = pv.lines.length
+        ? await this.post(tx, { companyId, date: pv.fiscalYear.endDate, memo: `Year-end close ${pv.fiscalYear.label}`, sourceType: 'year_end_close', sourceId: fiscalYearId, lines: pv.lines.map(({ accountId, debit, credit, memo }) => ({ accountId, debit, credit, memo })), actorId, ip, allowLockedPeriod: true })
+        : null;
+      await tx.accountingPeriod.updateMany({ where: { companyId, fiscalYearId }, data: { status: 'LOCKED' } });
+      const fy = await tx.fiscalYear.update({ where: { id: fiscalYearId }, data: { status: 'CLOSED', closingEntryId: entry?.id ?? null, closedAt: new Date(), closedById: actorId } });
+      await this.audit.record({ action: 'fiscal_year.closed', companyId, actorId, entityType: 'FiscalYear', entityId: fiscalYearId, metadata: { label: fy.label, netIncome: pv.netIncome, journalNumber: entry?.number ?? null }, ip }, tx);
+      return { fiscalYear: fy, closingEntry: entry ? { id: entry.id, number: entry.number } : null, netIncome: pv.netIncome };
+    });
+  }
+
+  /**
+   * Undo the last close: post the exact opposite of the closing entry (linked as its reversal) and mark the year OPEN.
+   * Only the most recent closed year can be reopened. Periods stay locked: unlock the ones you need to adjust.
+   */
+  async reopenYear(companyId: string, fiscalYearId: string, actorId: string, ip: string | null) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "FiscalYear" WHERE id = ${fiscalYearId}::uuid AND "companyId" = ${companyId}::uuid FOR UPDATE`;
+      const fy = await tx.fiscalYear.findFirst({ where: { id: fiscalYearId, companyId } });
+      if (!fy) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Fiscal year not found' });
+      if (fy.status !== 'CLOSED') throw new ConflictException({ code: 'NOT_CLOSED', message: `${fy.label} is not closed` });
+      const later = await tx.fiscalYear.findFirst({ where: { companyId, startDate: { gt: fy.endDate }, status: 'CLOSED' } });
+      if (later) throw new ConflictException({ code: 'LATER_YEAR_CLOSED', message: `Reopen ${later.label} first: years are reopened newest first` });
+      let reopen: { id: string; number: number | null } | null = null;
+      if (fy.closingEntryId) {
+        const orig = await tx.journalEntry.findFirstOrThrow({ where: { id: fy.closingEntryId }, include: { lines: { orderBy: { lineNo: 'asc' } } } });
+        reopen = await this.post(tx, { companyId, date: isoOf(orig.date), memo: `Reopen ${fy.label} (reverses #${orig.number})`, sourceType: 'year_end_reopen', sourceId: fiscalYearId, reversalOfId: orig.id, lines: reverseLines(orig.lines), actorId, ip, allowLockedPeriod: true });
+      }
+      const updated = await tx.fiscalYear.update({ where: { id: fiscalYearId }, data: { status: 'OPEN', closingEntryId: null, closedAt: null, closedById: null } });
+      await this.audit.record({ action: 'fiscal_year.reopened', companyId, actorId, entityType: 'FiscalYear', entityId: fiscalYearId, metadata: { label: fy.label, reversalNumber: reopen?.number ?? null }, ip }, tx);
+      return { fiscalYear: updated, reopenEntry: reopen ? { id: reopen.id, number: reopen.number } : null };
+    });
   }
 
   async addFiscalYear(companyId: string, startDate: string | undefined, actorId: string, ip: string | null) {

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { INestApplication } from '@nestjs/common';
 import type { PrismaClient } from '@ca/database';
+import { authenticator } from 'otplib';
 import { PASSWORD, ORIGIN, agent, bootApp, resetDb, setupAdmin, totp } from './helpers';
 
 let app: INestApplication;
@@ -157,9 +158,24 @@ describe('MFA (TOTP)', () => {
     const creds = { email: 'root@example.test', password: PASSWORD };
     expect((await agent(app).post('/auth/login', creds)).body.code).toBe('MFA_REQUIRED');
     expect((await agent(app).post('/auth/login', { ...creds, mfaCode: '000000' })).body.code).toBe('INVALID_MFA');
-    await agent(app).post('/auth/login', { ...creds, mfaCode: totp(enroll.secret) }).expect(200);
+    // The code that activated MFA was consumed: it cannot be used to sign in.
+    expect((await agent(app).post('/auth/login', { ...creds, mfaCode: totp(enroll.secret) })).body.code).toBe('INVALID_MFA');
+    // The next time step's code works (±1 step of clock drift is allowed) — once.
+    const next = authenticator.clone({ epoch: Date.now() + 30_000 }).generate(enroll.secret);
+    await agent(app).post('/auth/login', { ...creds, mfaCode: next }).expect(200);
+    expect((await agent(app).post('/auth/login', { ...creds, mfaCode: next })).body.code).toBe('INVALID_MFA');
     await agent(app).post('/auth/login', { ...creds, mfaCode: recoveryCodes[0] }).expect(200);
     await agent(app).post('/auth/login', { ...creds, mfaCode: recoveryCodes[0] }).expect(401);
+  });
+
+  it('two simultaneous sign-ins with the same code: exactly one succeeds', async () => {
+    const a = await setupAdmin(app);
+    const enroll = (await a.post('/auth/mfa/enroll').expect(201)).body;
+    await a.post('/auth/mfa/activate', { code: totp(enroll.secret) }).expect(200);
+    const next = authenticator.clone({ epoch: Date.now() + 30_000 }).generate(enroll.secret);
+    const creds = { email: 'root@example.test', password: PASSWORD, mfaCode: next };
+    const results = await Promise.all(Array.from({ length: 5 }, () => agent(app).post('/auth/login', creds)));
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
   });
 });
 

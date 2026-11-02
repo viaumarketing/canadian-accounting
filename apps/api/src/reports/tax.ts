@@ -56,7 +56,29 @@ const posOf = (b: Map<string, { debit: Decimal; credit: Decimal }>, payableId?: 
   return (p ? p.credit.minus(p.debit) : D(0)).minus(r ? r.debit.minus(r.credit) : D(0)); // net payable position
 };
 
-export interface TaxInputs { adj104?: string; adj107?: string; instalments110?: string; rebates111?: string; selfAssess?: string }
+export interface TaxInputs {
+  adj104?: string; adj107?: string; instalments110?: string; rebates111?: string; selfAssess?: string;
+  /** Quick Method only: ITCs still claimable (capital and real property), and GST/HST-included eligible sales from other sources (Shopify, bank) with their rate */
+  itcCapital?: string; qmOtherSales?: string; qmOtherRate?: string;
+}
+type QMRates = Record<string, { rate: string; credit?: string }>;
+
+/** Invoice/credit-note lines taxed at GST/HST, per tax code: GST/HST-included amount and the GST/HST on it (credit notes negative). */
+async function gstHstSalesByCode(c: Ctx, from: string, to: string) {
+  if (from > to) return new Map<string, { incl: Decimal; tax: Decimal; name: string }>();
+  const lines = await c.prisma.invoiceLine.findMany({ where: { companyId: c.companyId, invoice: { issueDate: { gte: toDate(from), lte: toDate(to) }, status: { in: ['POSTED', 'PARTIAL', 'PAID'] } } }, include: { invoice: { select: { kind: true } }, taxCode: { select: { code: true, name: true } } } });
+  const m = new Map<string, { incl: Decimal; tax: Decimal; name: string }>();
+  for (const l of lines) {
+    const tax = (l.taxDetail as { component: string; amount: string }[]).filter((t) => t.component === 'GST' || t.component === 'HST').reduce((a, t) => a.plus(t.amount), D(0));
+    if (tax.isZero()) continue; // zero-rated or exempt: not part of the Quick Method calculation
+    const sign = l.invoice.kind === 'CREDIT' ? -1 : 1;
+    const e = m.get(l.taxCode.code) ?? { incl: D(0), tax: D(0), name: l.taxCode.name };
+    e.incl = e.incl.plus(D(String(l.net)).plus(tax).times(sign)); e.tax = e.tax.plus(tax.times(sign)); m.set(l.taxCode.code, e);
+  }
+  return m;
+}
+const dollars = (v: Decimal) => v.toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+const cents = (v: Decimal) => v.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 
 export async function taxReport(c: Ctx, kind: TaxKind, p: { from: string; to: string } & TaxInputs): Promise<Report> {
   const g = GROUPS[kind];
@@ -72,17 +94,85 @@ export async function taxReport(c: Ctx, kind: TaxKind, p: { from: string; to: st
   const num = (v?: string) => D(v && /^-?\d+(\.\d+)?$/.test(v) ? v : 0);
 
   if (kind === 'gst-hst') {
-    const l103 = pos.collected, l104 = num(p.adj104), l105 = l103.plus(l104);
-    const l106 = pos.itc, l107 = num(p.adj107), l108 = l106.plus(l107);
+    const qm = regs.find((x) => x.quickMethodFrom && isoOf(x.quickMethodFrom) <= p.from);
+    const starts = regs.find((x) => x.quickMethodFrom && isoOf(x.quickMethodFrom) > p.from && isoOf(x.quickMethodFrom) <= p.to);
+    if (starts) r.checks.push({ label: 'The Quick Method election starts inside this period', ok: false, detail: `Run separate reports before and from ${isoOf(starts.quickMethodFrom!)}` });
+    let l101: Decimal, l103: Decimal, l106: Decimal, l107: Decimal;
+    let src: Record<'101' | '103' | '106' | '107' | '108', string>;
+    let qmSection: Report['sections'][number] | null = null;
+    if (!qm) {
+      l101 = revenue; l103 = pos.collected; l106 = pos.itc; l107 = num(p.adj107);
+      src = { '101': 'Ledger: revenue accounts, net of returns', '103': 'Ledger: GST/HST payable from invoices, credit notes, Shopify, bank receipts', '106': 'Ledger: GST/HST receivable from bills, expenses, bank payments', '107': 'You enter (e.g. bad-debt write-offs)', '108': '106 + 107 (regular method)' };
+    } else {
+      // Quick Method, following CRA guide RC4058 ("Filling out your GST/HST return using the quick method").
+      const rates = (qm.quickMethodRates ?? {}) as QMRates;
+      const cur = await gstHstSalesByCode(c, p.from, p.to);
+      const groups = new Map<string, { rate: Decimal; credit: Decimal; incl: Decimal; codes: string[] }>();
+      let nonEligibleTax = D(0); const nonEligible: string[] = [];
+      for (const [code, v] of cur) {
+        const rr = rates[code];
+        if (!rr) { nonEligibleTax = nonEligibleTax.plus(v.tax); nonEligible.push(code); continue; }
+        const k = `${rr.rate}|${rr.credit ?? '0'}`;
+        const g0 = groups.get(k) ?? { rate: D(rr.rate), credit: D(rr.credit ?? 0), incl: D(0), codes: [] };
+        g0.incl = g0.incl.plus(v.incl); g0.codes.push(code); groups.set(k, g0);
+      }
+      const otherSales = num(p.qmOtherSales);
+      if (!otherSales.isZero()) {
+        const rate = D(p.qmOtherRate && /^0(\.\d{1,4})?$/.test(p.qmOtherRate) ? p.qmOtherRate : 0);
+        const k = `${rate.toString()}|0`;
+        const g0 = groups.get(k) ?? { rate, credit: D(0), incl: D(0), codes: [] };
+        g0.incl = g0.incl.plus(otherSales); g0.codes.push('other sales (you entered)'); groups.set(k, g0);
+      }
+      // Each remittance rate is calculated separately on its sales, rounded to the dollar like line 101.
+      const calc = [...groups.values()].map((x) => ({ ...x, base: dollars(x.incl), remit: cents(dollars(x.incl).times(x.rate)), creditAmt: cents(dollars(x.incl).times(x.credit)) }));
+      l101 = calc.reduce((a, x) => a.plus(x.base), D(0));
+      l103 = calc.reduce((a, x) => a.plus(x.remit), D(0)).plus(nonEligibleTax);
+      l106 = num(p.itcCapital).plus(calc.reduce((a, x) => a.plus(x.creditAmt), D(0)));
+      // 1% credit on the first $30,000 of eligible supplies (GST/HST included) in each fiscal year, if the election was in
+      // effect at the start of the fiscal year (or from the day a new registrant registered).
+      const fy = await fiscalYearBounds(c, p.from);
+      const qmFrom = isoOf(qm.quickMethodFrom!);
+      const qualifies = qmFrom <= fy.start || qmFrom === isoOf(qm.effectiveFrom);
+      const priorMap = await gstHstSalesByCode(c, fy.start > qmFrom ? fy.start : qmFrom, addDays(p.from, -1));
+      const prior = [...priorMap].filter(([code]) => rates[code]).reduce((a, [, v]) => a.plus(v.incl), D(0));
+      const room = Decimal.max(D(30000).minus(Decimal.max(prior, D(0))), D(0));
+      const credit = qualifies ? cents(Decimal.min(Decimal.max(l101, D(0)), room).times('0.01')) : D(0);
+      l107 = credit.plus(num(p.adj107));
+      src = {
+        '101': 'Eligible sales including GST/HST, rounded to the dollar per remittance rate (see the Quick Method calculation below)',
+        '103': `Σ (sales × remittance rate)${nonEligible.length ? ` + full GST/HST on supplies with no Quick Method rate (${nonEligible.join(', ')})` : ''}`,
+        '106': 'ITCs still claimable under the Quick Method (capital and real property, you enter) + credits on 0%-rate supplies',
+        '107': `1% credit on the first $30,000 of eligible sales this fiscal year (${qualifies ? `${m2(credit)}; ${m2(prior)} already used earlier in the year` : 'not available: the election was not in effect at the start of the fiscal year'}) + adjustments you enter`,
+        '108': '106 + 107 (Quick Method)',
+      };
+      qmSection = ({
+        title: 'Quick Method calculation (CRA guide RC4058)',
+        columns: [col('codes', 'Tax codes'), col('base', 'Eligible sales incl. GST/HST', 'money'), col('rate', 'Remittance rate', 'pct'), col('remit', 'Tax to remit (line 103)', 'money'), col('credit', 'Credit (line 106)', 'money')],
+        rows: [
+          ...calc.map((x) => row({ codes: x.codes.join(', '), base: m2(x.base), rate: x.rate.times(100).toNumber(), remit: m2(x.remit), credit: x.credit.isZero() ? null : m2(x.creditAmt) })),
+          ...(nonEligible.length ? [row({ codes: `${nonEligible.join(', ')} (no Quick Method rate: reported in full)`, remit: m2(nonEligibleTax) })] : []),
+        ],
+        totals: [row({ codes: 'Total', base: m2(l101), remit: m2(l103), credit: m2(l106.minus(num(p.itcCapital))) }, { bold: true })],
+      });
+      // GST/HST in the ledger that did not come from invoices (Shopify orders, bank receipts) cannot be split by remittance rate here.
+      const invoiceTax = [...cur.values()].reduce((a, v) => a.plus(v.tax), D(0));
+      const unexplained = pos.collected.minus(invoiceTax);
+      if (!unexplained.isZero()) {
+        r.checks.push({ label: 'All GST/HST-taxed sales are in the Quick Method calculation', ok: !otherSales.isZero(), detail: `${m2(unexplained)} of GST/HST was collected outside invoices (Shopify orders, bank receipts). Enter those sales including GST/HST and their remittance rate in "Other eligible sales".` });
+      }
+      r.notes.push(`Quick Method in effect since ${qmFrom}. Remittance rates are the ones you recorded for each tax code (from the RC4058 rate charts); the system does not choose them. Invoices with a tax code that has no Quick Method rate are treated as supplies not eligible for the calculation, and their GST/HST is reported in full.`);
+    }
+    const l104 = num(p.adj104), l105 = l103.plus(l104);
+    const l108 = l106.plus(l107);
     const l109 = l105.minus(l108);
     const rows: Row[] = [
-      row({ line: '101', name: 'Total sales and other revenue (excluding GST/HST and PST)', amount: m2(revenue), src: 'Ledger: revenue accounts, net of returns' }),
-      row({ line: '103', name: 'GST/HST collected or collectible', amount: m2(l103), src: 'Ledger: GST/HST payable from invoices, credit notes, Shopify, bank receipts' }),
+      row({ line: '101', name: qm ? 'Eligible sales and other revenue, including GST/HST (Quick Method)' : 'Total sales and other revenue (excluding GST/HST and PST)', amount: m2(l101), src: src['101'] }),
+      row({ line: '103', name: 'GST/HST collected or collectible', amount: m2(l103), src: src['103'] }),
       row({ line: '104', name: 'Adjustments to be added to the net tax', amount: m2(l104), src: 'You enter (e.g. recovered bad debts)' }),
       row({ line: '105', name: 'Total GST/HST and adjustments', amount: m2(l105), src: '103 + 104' }, { bold: true }),
-      row({ line: '106', name: 'GST/HST paid or payable (ITCs)', amount: m2(l106), src: 'Ledger: GST/HST receivable from bills, expenses, bank payments' }),
-      row({ line: '107', name: 'Adjustments to be deducted', amount: m2(l107), src: 'You enter (e.g. bad-debt write-offs)' }),
-      row({ line: '108', name: 'Total ITCs and adjustments', amount: m2(l108), src: '106 + 107 (regular method)' }, { bold: true }),
+      row({ line: '106', name: 'GST/HST paid or payable (ITCs)', amount: m2(l106), src: src['106'] }),
+      row({ line: '107', name: 'Adjustments to be deducted', amount: m2(l107), src: src['107'] }),
+      row({ line: '108', name: 'Total ITCs and adjustments', amount: m2(l108), src: src['108'] }, { bold: true }),
       row({ line: '109', name: 'Net tax', amount: m2(l109), src: '105 − 108; a negative number is a refund position' }, { bold: true }),
     ];
     const l110 = num(p.instalments110), l111 = num(p.rebates111), self = num(p.selfAssess);
@@ -94,7 +184,23 @@ export async function taxReport(c: Ctx, kind: TaxKind, p: { from: string; to: st
       row({ line: '114/115', name: ind.isNegative() ? 'Indicative refund' : 'Indicative amount owing', amount: m2(ind), src: '109 − 110 − 111 + 205/405' }, { bold: true }),
     );
     r.sections.push({ title: 'Return preparation (CRA GST/HST return lines)', columns: [col('line', 'Line'), col('name', 'Description'), col('amount', 'Amount', 'money'), col('src', 'Source')], rows });
-    r.notes.push('Line numbers follow the CRA GST/HST return instructions. The system computes 101, 103, 105, 106, 108 and 109 from the ledger; 104, 107, 110, 111 and 205/405 depend on facts the ledger cannot know, so you enter them (query inputs adj104, adj107, instalments110, rebates111, selfAssess). Quick-method and simplified-ITC filers calculate differently. Nothing is filed by this system.');
+    // Quick Method detail after the return lines it supports.
+    if (qmSection) r.sections.push(qmSection);
+    if (qm) {
+      // The books still hold all GST/HST collected and every ITC recorded on purchases; the Quick Method keeps the difference.
+      const adj = pos.collected.minus(pos.itc).minus(l109);
+      r.sections.push({
+        title: 'Suggested entry to record this return under the Quick Method (not posted)',
+        columns: [col('name', 'Account'), col('debit', 'Debit', 'money'), col('credit', 'Credit', 'money')],
+        rows: [
+          row({ name: 'GST/HST payable (all collected this period)', debit: m2(pos.collected) }),
+          row({ name: 'GST/HST receivable (ITCs recorded on purchases this period)', credit: m2(pos.itc) }),
+          row({ name: 'GST/HST to remit (line 109)', credit: m2(l109) }),
+          row({ name: adj.isNegative() ? 'Quick Method adjustment (expense)' : 'Quick Method adjustment (other income)', ...(adj.isNegative() ? { debit: m2(adj.neg()) } : { credit: m2(adj) }) }),
+        ],
+      });
+    }
+    r.notes.push('Line numbers follow the CRA GST/HST return instructions. The system computes 101, 103, 105, 106, 108 and 109 from the ledger; 104, 107, 110, 111 and 205/405 depend on facts the ledger cannot know, so you enter them (query inputs adj104, adj107, instalments110, rebates111, selfAssess). The Quick Method is supported when it is recorded on the GST/HST registration; simplified-ITC filers calculate differently. Nothing is filed by this system.');
   } else {
     r.sections.push({ title: `${g.label} summary`, columns: [col('name', 'Item'), col('amount', 'Amount', 'money')], rows: [
       row({ name: `${g.label} collected from customers`, amount: m2(pos.collected) }),

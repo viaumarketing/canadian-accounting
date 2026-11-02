@@ -6,7 +6,7 @@ import { fmtMoney } from '@/lib/company';
 export interface Col { key: string; label: string; kind: 'text' | 'money' | 'pct' | 'date' | 'int' }
 export interface RRow { cells: Record<string, string | number | null>; level?: number; bold?: boolean }
 export interface RSection { title?: string; columns: Col[]; rows: RRow[]; totals?: RRow[] }
-export interface ReportData { key: string; title: string; subtitle?: string; company: string; generatedAt: string; sections: RSection[]; checks: { label: string; ok: boolean; detail?: string }[]; notes: string[] }
+export interface ReportData { key: string; title: string; subtitle?: string; company: string; generatedAt: string; sections: RSection[]; checks: { label: string; ok: boolean; detail?: string }[]; notes: string[]; paging?: { page: number; pages: number; pageSize: number; total: number } }
 
 const show = (c: Col, v: string | number | null) => (v === null || v === undefined || v === '' ? '' : c.kind === 'money' ? fmtMoney(v) : c.kind === 'pct' ? `${Number(v).toFixed(1)}%` : String(v));
 

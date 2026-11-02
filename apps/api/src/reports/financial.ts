@@ -7,7 +7,7 @@ import { isoOf, toDate } from '../accounting/setup';
 export async function profitAndLoss(c: Ctx, p: { from: string; to: string; compare: Compare }): Promise<Report> {
   const cmp = comparisonRange(p.from, p.to, p.compare);
   const accts = await loadAccounts(c);
-  const [cur, prev] = await Promise.all([balances(c, { from: p.from, to: p.to }), cmp ? balances(c, cmp) : Promise.resolve(null)]);
+  const [cur, prev] = await Promise.all([balances(c, { from: p.from, to: p.to, excludeClosing: true }), cmp ? balances(c, { ...cmp, excludeClosing: true }) : Promise.resolve(null)]);
   const bal = (a: Acct, i: number) => natural(a, (i === 0 ? cur : prev!).get(a.id));
   const cols = cmp ? 2 : 1;
   const r = newReport(c, 'profit-loss', 'Profit and Loss', `${p.from} to ${p.to}${cmp ? ` · compared with ${cmp.from} to ${cmp.to}` : ''} · accrual basis`);
@@ -35,7 +35,7 @@ export async function profitAndLoss(c: Ctx, p: { from: string; to: string; compa
   // Tie-out: independent computation straight from the trial-balance totals of REVENUE/EXPENSE accounts.
   const tbNet = accts.filter((a) => a.type === 'REVENUE').reduce((s, a) => s.plus(natural(a, cur.get(a.id))), D(0)).minus(accts.filter((a) => a.type === 'EXPENSE').reduce((s, a) => s.plus(natural(a, cur.get(a.id))), D(0)));
   r.checks.push({ label: 'Net income equals total revenue minus total expenses, recomputed straight from the ledger', ok: tbNet.eq(niTot[0]), detail: tbNet.eq(niTot[0]) ? undefined : `report ${m2(niTot[0])} vs ledger ${m2(tbNet)}` });
-  r.notes.push('Prepared on the accrual basis from posted journal entries. Cash-basis reporting and gross profit (cost-of-sales flag) are not available yet.');
+  r.notes.push('Prepared on the accrual basis from posted journal entries; year-end closing entries are left out so a closed year still shows its results. Cash-basis reporting and gross profit (cost-of-sales flag) are not available yet.');
   return r;
 }
 
@@ -55,7 +55,7 @@ export async function balanceSheet(c: Ctx, p: { asOf: string; compare: Compare }
   const equity = accountTree(accts, 'EQUITY', [], bal, cols);
   const tot = (nodes: typeof assets) => Array.from({ length: cols }, (_, i) => nodes.filter((n) => n.level === 0).reduce((s, n) => s.plus(n.total[i]), D(0)));
   const A = tot(assets), L = tot(liabs), E = tot(equity);
-  // No year-end close exists yet, so revenue/expense balances are the unclosed earnings of every period to date.
+  // Revenue/expense balances to date are the earnings of years not yet closed (closing entries move closed years to Retained Earnings).
   const earnings = Array.from({ length: cols }, (_, i) => {
     const b = i === 0 ? cur : prev!;
     return accts.filter((a) => a.type === 'REVENUE').reduce((s, a) => s.plus(natural(a, b.get(a.id))), D(0)).minus(accts.filter((a) => a.type === 'EXPENSE').reduce((s, a) => s.plus(natural(a, b.get(a.id))), D(0)));
@@ -68,7 +68,7 @@ export async function balanceSheet(c: Ctx, p: { asOf: string; compare: Compare }
     const ok = A[i].eq(L[i].plus(equityTotal[i]));
     r.checks.push({ label: `Assets = liabilities + equity${i ? ' (comparison)' : ''}`, ok, detail: ok ? undefined : `assets ${m2(A[i])} vs ${m2(L[i].plus(equityTotal[i]))}` });
   }
-  r.notes.push('No year-end close has been run, so each year’s profit stays in "net income not yet closed" until closing entries are supported.');
+  r.notes.push('Profit of fiscal years that have been closed is in Retained Earnings; "net income not yet closed" is the profit of years still open.');
   return r;
 }
 
@@ -81,7 +81,8 @@ export async function cashFlow(c: Ctx, p: { from: string; to: string }): Promise
   if (!cashIds.size) { r.notes.push('No chequing or savings accounts are defined under Banking, so there is no cash to report on.'); r.sections.push({ columns, rows: [] }); return r; }
 
   const before = addDays(p.from, -1);
-  const [open, close, period] = await Promise.all([balances(c, { to: before }), balances(c, { to: p.to }), balances(c, { from: p.from, to: p.to })]);
+  // Closing entries are left out everywhere here: they only move profit into Retained Earnings and involve no cash.
+  const [open, close, period] = await Promise.all([balances(c, { to: before, excludeClosing: true }), balances(c, { to: p.to, excludeClosing: true }), balances(c, { from: p.from, to: p.to, excludeClosing: true })]);
   const ni = accts.filter((a) => a.type === 'REVENUE').reduce((s, a) => s.plus(natural(a, period.get(a.id))), D(0)).minus(accts.filter((a) => a.type === 'EXPENSE').reduce((s, a) => s.plus(natural(a, period.get(a.id))), D(0)));
 
   const classOf = (a: Acct) => a.cashFlow ?? (a.type === 'EQUITY' ? 'FINANCING' : 'OPERATING');
@@ -151,17 +152,37 @@ export async function trialBalanceReport(c: Ctx, p: { asOf: string }): Promise<R
   return r;
 }
 
-export async function generalLedgerReport(c: Ctx, p: { accountId: string; from: string; to: string }): Promise<Report> {
+export const GL_PAGE_SIZE = 500;
+
+/** General ledger of one account. With `page`, only that page of lines is returned (screen); without it, every line (exports). */
+export async function generalLedgerReport(c: Ctx, p: { accountId: string; from: string; to: string; page?: number }): Promise<Report> {
   const acct = await c.prisma.account.findFirst({ where: { id: p.accountId, companyId: c.companyId } });
   if (!acct) throw new Error('Account not found');
   const dateRange = { gte: toDate(p.from), lte: toDate(p.to) };
-  const open = await c.prisma.journalLine.aggregate({ where: { companyId: c.companyId, accountId: p.accountId, entry: { status: 'POSTED', date: { lt: dateRange.gte } } }, _sum: { debit: true, credit: true } });
-  const lines = await c.prisma.journalLine.findMany({ where: { companyId: c.companyId, accountId: p.accountId, entry: { status: 'POSTED', date: dateRange } }, include: { entry: { select: { date: true, number: true, memo: true, sourceType: true } } }, orderBy: [{ entry: { date: 'asc' } }, { entry: { number: 'asc' } }, { lineNo: 'asc' }] });
-  let run = D(open._sum.debit ?? 0).minus(open._sum.credit ?? 0);
-  const r = newReport(c, 'general-ledger', `General Ledger: ${acct.code} ${acct.name}`, `${p.from} to ${p.to}`);
-  const rows: Row[] = [row({ memo: 'Opening balance', balance: m2(run) }, { bold: true })];
+  const inRange = { companyId: c.companyId, accountId: p.accountId, entry: { status: 'POSTED' as const, date: dateRange } };
+  const order = [{ entry: { date: 'asc' as const } }, { entry: { number: 'asc' as const } }, { lineNo: 'asc' as const }];
+  const [open, all, total] = await Promise.all([
+    c.prisma.journalLine.aggregate({ where: { companyId: c.companyId, accountId: p.accountId, entry: { status: 'POSTED', date: { lt: dateRange.gte } } }, _sum: { debit: true, credit: true } }),
+    c.prisma.journalLine.aggregate({ where: inRange, _sum: { debit: true, credit: true } }),
+    c.prisma.journalLine.count({ where: inRange }),
+  ]);
+  const opening = D(open._sum.debit ?? 0).minus(open._sum.credit ?? 0);
+  const closing = opening.plus(D(all._sum.debit ?? 0)).minus(D(all._sum.credit ?? 0));
+  const pages = Math.max(1, Math.ceil(total / GL_PAGE_SIZE));
+  const page = p.page ? Math.min(Math.max(1, p.page), pages) : null;
+  const skip = page ? (page - 1) * GL_PAGE_SIZE : 0;
+  // Balance brought forward to this page = opening + every line on the earlier pages, in the same order.
+  const before = skip ? await c.prisma.journalLine.findMany({ where: inRange, orderBy: order, take: skip, select: { debit: true, credit: true } }) : [];
+  let run = before.reduce((s, l) => s.plus(l.debit.toString()).minus(l.credit.toString()), opening);
+  const lines = await c.prisma.journalLine.findMany({ where: inRange, include: { entry: { select: { date: true, number: true, memo: true, sourceType: true } } }, orderBy: order, ...(page ? { skip, take: GL_PAGE_SIZE } : {}) });
+  const r = newReport(c, 'general-ledger', `General Ledger: ${acct.code} ${acct.name}`, `${p.from} to ${p.to}${page && pages > 1 ? ` · page ${page} of ${pages}` : ''}`);
+  const rows: Row[] = [row({ memo: skip ? 'Balance brought forward' : 'Opening balance', balance: m2(run) }, { bold: true })];
   for (const l of lines) { run = run.plus(l.debit.toString()).minus(l.credit.toString()); rows.push(row({ date: isoOf(l.entry.date), number: l.entry.number, source: l.entry.sourceType, memo: l.memo ?? l.entry.memo, debit: D(l.debit).isZero() ? null : m2(D(l.debit)), credit: D(l.credit).isZero() ? null : m2(D(l.credit)), balance: m2(run) })); }
-  r.sections.push({ columns: [col('date', 'Date', 'date'), col('number', '#', 'int'), col('source', 'Source'), col('memo', 'Memo'), col('debit', 'Debit', 'money'), col('credit', 'Credit', 'money'), col('balance', 'Balance (debit +)', 'money')], rows, totals: [row({ memo: 'Closing balance', balance: m2(run) }, { bold: true })] });
+  const last = !page || page === pages;
+  r.sections.push({ columns: [col('date', 'Date', 'date'), col('number', '#', 'int'), col('source', 'Source'), col('memo', 'Memo'), col('debit', 'Debit', 'money'), col('credit', 'Credit', 'money'), col('balance', 'Balance (debit +)', 'money')], rows, totals: [...(last ? [] : [row({ memo: 'Balance carried forward', balance: m2(run) }, { bold: true })]), row({ memo: `Closing balance (${p.to})`, balance: m2(closing) }, { bold: true })] });
+  if (page) r.paging = { page, pages, pageSize: GL_PAGE_SIZE, total };
+  if (last && !run.eq(closing)) r.checks.push({ label: 'Running balance reaches the closing balance', ok: false, detail: `${m2(run)} vs ${m2(closing)}` });
+  run = closing;
   const tb = await balances(c, { to: p.to });
   const closeLedger = net(tb.get(p.accountId));
   r.checks.push({ label: 'Closing balance equals the trial-balance balance', ok: closeLedger.eq(run), detail: closeLedger.eq(run) ? undefined : `${m2(run)} vs ${m2(closeLedger)}` });

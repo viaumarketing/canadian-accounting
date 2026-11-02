@@ -8,9 +8,11 @@ import {
   changeMemberRoleSchema,
   createCompanySchema,
   inviteMemberSchema,
+  quickMethodSchema,
   taxRegistrationSchema,
   updateCompanySchema,
 } from '@ca/shared';
+import { z } from 'zod';
 import { ZodPipe } from '../common/zod.pipe';
 import { ClientIp, CurrentMembership, CurrentUser, RequirePermission, SuperAdminOnly } from '../auth/decorators';
 import { AuthUser, MembershipContext } from '../auth/auth.types';
@@ -110,6 +112,18 @@ export class CompaniesController {
     @ClientIp() ip: string | null,
   ) {
     return this.companies.addTaxRegistration(id, body, user.id, ip);
+  }
+
+  @RequirePermission('taxes:create')
+  @Patch('companies/:companyId/tax-registrations/:registrationId/quick-method')
+  setQuickMethod(
+    @Param('companyId') id: string,
+    @Param('registrationId', ParseUUIDPipe) registrationId: string,
+    @Body(new ZodPipe(quickMethodSchema)) body: z.infer<typeof quickMethodSchema>,
+    @CurrentUser() user: AuthUser,
+    @ClientIp() ip: string | null,
+  ) {
+    return this.companies.setQuickMethod(id, registrationId, body, user.id, ip);
   }
 
   @RequirePermission('audit:view')

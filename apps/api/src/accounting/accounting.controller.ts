@@ -44,6 +44,14 @@ export class AccountingController {
   @RequirePermission('journal:approve') @Patch('periods/:id')
   lock(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @Body(new ZodPipe(lockPeriodSchema)) b: { locked: boolean }, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.ledger.setPeriodLock(c, id, b.locked, u.id, ip); }
 
+  @RequirePermission('journal:view') @Get('fiscal-years')
+  fiscalYears(@Param('companyId') c: string) { return this.ledger.listFiscalYears(c); }
+  @RequirePermission('journal:view') @Get('fiscal-years/:id/close-preview')
+  closePreview(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string) { return this.ledger.closePreview(c, id); }
+  @RequirePermission('journal:approve') @Post('fiscal-years/:id/close')
+  closeYear(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.ledger.closeYear(c, id, u.id, ip); }
+  @RequirePermission('journal:reverse') @Post('fiscal-years/:id/reopen')
+  reopenYear(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.ledger.reopenYear(c, id, u.id, ip); }
   @RequirePermission('journal:approve') @Post('fiscal-years')
   fiscalYear(@Param('companyId') c: string, @Body(new ZodPipe(createFiscalYearSchema)) b: { startDate?: string }, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.ledger.addFiscalYear(c, b.startDate, u.id, ip); }
 

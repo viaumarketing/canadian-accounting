@@ -15,6 +15,8 @@ const LOCK_MINUTES = 15;
 const ISSUER = 'Canadian Accounting';
 
 authenticator.options = { window: 1 };
+/** Current TOTP time step (otplib's default 30 s step from the Unix epoch). */
+const currentStep = () => Math.floor(Date.now() / 1000 / 30);
 
 @Injectable()
 export class AuthService {
@@ -75,7 +77,9 @@ export class AuthService {
   private async checkMfa(userId: string, secretEnc: string, code: string): Promise<boolean> {
     const clean = code.replace(/\s/g, '');
     if (/^\d{6}$/.test(clean)) {
-      return authenticator.check(clean, decrypt(secretEnc, this.config.ENCRYPTION_KEY));
+      const delta = authenticator.checkDelta(clean, decrypt(secretEnc, this.config.ENCRYPTION_KEY));
+      if (delta === null) return false;
+      return this.consumeStep(userId, currentStep() + delta);
     }
     // Recovery code: single use.
     const res = await this.prisma.recoveryCode.updateMany({
@@ -83,6 +87,16 @@ export class AuthService {
       data: { usedAt: new Date() },
     });
     return res.count === 1;
+  }
+
+  /**
+   * Replay protection: a TOTP code is valid for its 30 s step (±1 step of clock drift), so the same code could otherwise be
+   * used again by someone who saw it. Accept a step only if it is newer than the last accepted one; the conditional update
+   * makes two simultaneous uses of one code succeed at most once.
+   */
+  private async consumeStep(userId: string, step: number): Promise<boolean> {
+    const r = await this.prisma.user.updateMany({ where: { id: userId, OR: [{ mfaLastStep: null }, { mfaLastStep: { lt: step } }] }, data: { mfaLastStep: step } });
+    return r.count === 1;
   }
 
   async createSession(userId: string, ip: string | null, userAgent?: string) {
@@ -193,7 +207,8 @@ export class AuthService {
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     if (!user.mfaPendingSecretEnc) throw new BadRequestException({ code: 'MFA_NOT_ENROLLING', message: 'Start enrolment first' });
     const secret = decrypt(user.mfaPendingSecretEnc, this.config.ENCRYPTION_KEY);
-    if (!authenticator.check(code, secret)) {
+    const delta = authenticator.checkDelta(code, secret);
+    if (delta === null || !(await this.consumeStep(userId, currentStep() + delta))) {
       throw new BadRequestException({ code: 'INVALID_MFA', message: 'Invalid verification code' });
     }
     const codes = Array.from({ length: 8 }, () => randomBytes(5).toString('hex').replace(/(.{5})(.{5})/, '$1-$2'));

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
@@ -112,11 +112,24 @@ export class AdminService {
       const names = (await readdir(dir)).filter((n) => BACKUP_RE.test(n));
       const files = await Promise.all(names.map(async (n) => { const s = await stat(join(dir, n)); return { file: n, at: s.mtime, sizeBytes: s.size }; }));
       files.sort((a, b) => b.at.getTime() - a.at.getTime());
-      if (!files.length) return { status: 'missing' as const, count: 0, note: 'No backup files found in the backup directory.' };
+      const copy = await this.backupCopy(dir);
+      if (!files.length) return { status: 'missing' as const, count: 0, note: 'No backup files found in the backup directory.', copy };
       const ageHours = Math.round(((Date.now() - files[0].at.getTime()) / 3_600_000) * 10) / 10;
-      return { status: ageHours <= 36 ? ('ok' as const) : ('stale' as const), count: files.length, totalBytes: files.reduce((s, f) => s + f.sizeBytes, 0), latest: { ...files[0], ageHours }, recent: files.slice(0, 7), note: ageHours <= 36 ? undefined : 'The newest backup is older than 36 hours.' };
+      return { status: ageHours <= 36 ? ('ok' as const) : ('stale' as const), count: files.length, totalBytes: files.reduce((s, f) => s + f.sizeBytes, 0), latest: { ...files[0], ageHours }, recent: files.slice(0, 7), note: ageHours <= 36 ? undefined : 'The newest backup is older than 36 hours.', copy };
     } catch (e) {
       return { status: 'unreadable' as const, note: `Cannot read the backup directory: ${(e as Error).message}` };
+    }
+  }
+
+  /** Off-NAS copy result written by the backup container after each backup (copy-status.json). */
+  private async backupCopy(dir: string) {
+    try {
+      const j = JSON.parse(await readFile(join(dir, 'copy-status.json'), 'utf8')) as { at: string; status: string; file: string; message: string };
+      const ageHours = Math.round(((Date.now() - new Date(j.at).getTime()) / 3_600_000) * 10) / 10;
+      const status = j.status !== 'ok' ? ('failed' as const) : ageHours > 36 ? ('stale' as const) : ('ok' as const);
+      return { status, at: j.at, file: j.file, ageHours, message: j.message || (status === 'stale' ? 'The last copy is older than 36 hours.' : undefined) };
+    } catch {
+      return { status: 'not_configured' as const, message: 'No off-NAS copy is configured (BACKUP_COPY_DIR). A backup that only lives on the NAS does not survive the NAS.' };
     }
   }
 

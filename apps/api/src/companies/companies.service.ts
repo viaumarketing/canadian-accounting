@@ -111,6 +111,7 @@ export class CompaniesService {
             SELECT a."type"::text AS key, COALESCE(SUM(l."debit"),0)::text AS d, COALESCE(SUM(l."credit"),0)::text AS c
             FROM "JournalLine" l JOIN "JournalEntry" e ON e."id" = l."entryId" JOIN "Account" a ON a."id" = l."accountId"
             WHERE l."companyId" = ${companyId}::uuid AND e."status" = 'POSTED' AND e."date" BETWEEN ${fiscalYear.startDate} AND ${fiscalYear.endDate}
+              AND e."sourceType" NOT IN ('year_end_close', 'year_end_reopen')
             GROUP BY a."type"`
         : [];
       const roles = await this.prisma.$queryRaw<Row[]>`
@@ -239,6 +240,26 @@ export class CompaniesService {
 
   listTaxRegistrations(companyId: string) {
     return this.prisma.taxRegistration.findMany({ where: { companyId }, orderBy: [{ kind: 'asc' }, { effectiveFrom: 'desc' }] });
+  }
+
+  /** Elect (or stop) the GST/HST Quick Method on a registration and record the remittance rates per sales tax code. */
+  async setQuickMethod(companyId: string, registrationId: string, input: { from: string | null; rates: Record<string, { rate: string; credit?: string }> }, actorId: string, ip: string | null) {
+    const reg = await this.prisma.taxRegistration.findFirst({ where: { id: registrationId, companyId } });
+    if (!reg) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Registration not found' });
+    if (reg.kind !== 'GST_HST') throw new BadRequestException({ code: 'NOT_GST_HST', message: 'The Quick Method applies to GST/HST registrations only' });
+    if (input.from && new Date(`${input.from}T00:00:00Z`) < reg.effectiveFrom) throw new BadRequestException({ code: 'BEFORE_REGISTRATION', message: 'The election cannot start before the registration does' });
+    const codes = Object.keys(input.rates);
+    if (codes.length) {
+      const known = new Set((await this.prisma.taxCode.findMany({ where: { companyId, code: { in: codes } }, select: { code: true } })).map((c) => c.code));
+      const unknown = codes.filter((c) => !known.has(c));
+      if (unknown.length) throw new BadRequestException({ code: 'UNKNOWN_TAX_CODE', message: `Unknown tax code${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}` });
+    }
+    const updated = await this.prisma.taxRegistration.update({ where: { id: registrationId }, data: { quickMethodFrom: input.from ? new Date(`${input.from}T00:00:00Z`) : null, quickMethodRates: input.from ? input.rates : Prisma.DbNull } });
+    await this.audit.record({
+      action: 'tax_registration.quick_method', companyId, actorId, entityType: 'TaxRegistration', entityId: registrationId,
+      metadata: { from: input.from, rates: input.from ? input.rates : null, before: { from: reg.quickMethodFrom?.toISOString().slice(0, 10) ?? null, rates: reg.quickMethodRates ?? null } } as Prisma.InputJsonObject, ip,
+    });
+    return updated;
   }
 
   async addTaxRegistration(companyId: string, input: TaxRegistrationInput, actorId: string, ip: string | null) {

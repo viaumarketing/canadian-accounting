@@ -63,7 +63,7 @@ export class ReportsService {
       case 'balance-sheet': return balanceSheet(c, { asOf: asOf(), compare: this.parse({ compare }, q).compare });
       case 'cash-flow': return cashFlow(c, await range());
       case 'trial-balance': return trialBalanceReport(c, { asOf: asOf() });
-      case 'general-ledger': { const r = await range(); return generalLedgerReport(c, { ...r, accountId: this.parse({ accountId: uuid }, q).accountId }).catch((e) => { throw e.message === 'Account not found' ? new NotFoundException({ code: 'NOT_FOUND', message: 'Account not found' }) : e; }); }
+      case 'general-ledger': { const r = await range(); return generalLedgerReport(c, { ...r, accountId: this.parse({ accountId: uuid }, q).accountId, ...((q.format ?? 'json') === 'json' ? { page: this.parse({ page: z.coerce.number().int().min(1).default(1) }, q).page } : {}) }).catch((e) => { throw e.message === 'Account not found' ? new NotFoundException({ code: 'NOT_FOUND', message: 'Account not found' }) : e; }); }
       case 'journal': return journalReport(c, await range());
       case 'ar-aging': return aging(c, { kind: 'ar', asOf: asOf() });
       case 'ap-aging': return aging(c, { kind: 'ap', asOf: asOf() });
@@ -72,7 +72,7 @@ export class ReportsService {
       case 'revenue-by-channel': return revenueByChannel(c, await range());
       case 'tax-gst-hst': case 'tax-qst': case 'tax-pst': {
         const r = await range();
-        const inputs = this.parse({ adj104: money.optional(), adj107: money.optional(), instalments110: money.optional(), rebates111: money.optional(), selfAssess: money.optional() }, q);
+        const inputs = this.parse({ adj104: money.optional(), adj107: money.optional(), instalments110: money.optional(), rebates111: money.optional(), selfAssess: money.optional(), itcCapital: money.optional(), qmOtherSales: money.optional(), qmOtherRate: z.string().regex(/^0(\.\d{1,4})?$/).optional() }, q);
         return taxReport(c, key.slice(4) as 'gst-hst', { ...r, ...inputs });
       }
       case 'shopify-sales': return shopifySales(c, await range());

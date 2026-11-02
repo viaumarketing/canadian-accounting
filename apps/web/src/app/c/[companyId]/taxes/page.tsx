@@ -1,15 +1,68 @@
 'use client';
+import { useEffect, useState } from 'react';
 import { PageTitle, Table, Td } from '@/components/accounting/bits';
-import { Badge, Card } from '@/components/ui/card';
-import { FormError } from '@/components/ui/form';
-import { errorMessage } from '@/lib/api';
+import { Badge, Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Field, FormError, Input } from '@/components/ui/form';
+import { api, errorMessage } from '@/lib/api';
 import { useCompany } from '@/lib/company';
 import { useApi } from '@/lib/use-api';
 
 interface Code { id: string; code: string; name: string; kind: string; rates: { id: string; component: string; rate: string; recoverable: boolean; effectiveFrom: string; effectiveTo: string | null; source: string | null }[] }
 
+interface Reg { id: string; kind: string; registrationNumber: string; effectiveFrom: string; quickMethodFrom: string | null; quickMethodRates: Record<string, { rate: string; credit?: string }> | null }
+const pctToFraction = (v: string) => (v.trim() === '' ? null : (Math.round(parseFloat(v) * 100) / 10000).toString());
+const fractionToPct = (v?: string) => (v === undefined ? '' : String(Math.round(parseFloat(v) * 1000000) / 10000));
+
+/** GST/HST Quick Method election (CRA guide RC4058): start date and the remittance rate for each GST/HST sales tax code. */
+function QuickMethod({ companyId, codes, canEdit }: { companyId: string; codes: Code[]; canEdit: boolean }) {
+  const { data, reload } = useApi<Reg[]>(`/companies/${companyId}/tax-registrations`);
+  const reg = (data ?? []).find((r) => r.kind === 'GST_HST');
+  const taxable = codes.filter((c) => c.rates.some((r) => r.component === 'GST' || r.component === 'HST'));
+  const [from, setFrom] = useState('');
+  const [rates, setRates] = useState<Record<string, { rate: string; credit: string }>>({});
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (!reg) return;
+    setFrom(reg.quickMethodFrom?.slice(0, 10) ?? '');
+    setRates(Object.fromEntries(Object.entries(reg.quickMethodRates ?? {}).map(([k, v]) => [k, { rate: fractionToPct(v.rate), credit: fractionToPct(v.credit) }])));
+  }, [reg]);
+  if (!reg) return null;
+  async function save(off = false) {
+    setErr(null); setMsg(null);
+    const body = off ? { from: null, rates: {} } : {
+      from: from || null,
+      rates: Object.fromEntries(Object.entries(rates).filter(([, v]) => v.rate.trim() !== '').map(([k, v]) => [k, { rate: pctToFraction(v.rate)!, ...(v.credit.trim() ? { credit: pctToFraction(v.credit)! } : {}) }])),
+    };
+    try { await api(`/companies/${companyId}/tax-registrations/${reg!.id}/quick-method`, { method: 'PATCH', body }); await reload(); setMsg(off ? 'Back to the regular method.' : 'Saved.'); } catch (x) { setErr(errorMessage(x)); }
+  }
+  return (
+    <Card><CardHeader><CardTitle>GST/HST Quick Method</CardTitle></CardHeader><CardContent className="space-y-3 text-sm">
+      <p className="text-muted-foreground">
+        {reg.quickMethodFrom ? <>In effect since <strong>{reg.quickMethodFrom.slice(0, 10)}</strong> for {reg.registrationNumber}.</> : <>Not elected: {reg.registrationNumber} uses the regular method.</>}{' '}
+        Enter the remittance rate CRA guide RC4058 gives your business for each tax code you charge. The system never chooses rates for you. A tax code left blank is treated as a supply not eligible for the Quick Method, and its GST/HST is reported in full. The credit column is only for 0%-rate supplies.
+      </p>
+      <FormError message={err} />{msg && <p role="status" className="text-success">{msg}</p>}
+      <fieldset disabled={!canEdit} className="space-y-3">
+        <div className="max-w-xs"><Field label="Election in effect from" htmlFor="qm-from"><Input id="qm-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field></div>
+        <Table head={['Tax code', 'Remittance rate %', 'Credit % (0%-rate supplies only)']}>
+          {taxable.map((c) => (
+            <tr key={c.id}>
+              <Td mono>{c.code}</Td>
+              <Td><Input aria-label={`Remittance rate for ${c.code}`} inputMode="decimal" className="h-8 w-28" value={rates[c.code]?.rate ?? ''} onChange={(e) => setRates({ ...rates, [c.code]: { rate: e.target.value, credit: rates[c.code]?.credit ?? '' } })} /></Td>
+              <Td><Input aria-label={`Credit rate for ${c.code}`} inputMode="decimal" className="h-8 w-28" value={rates[c.code]?.credit ?? ''} onChange={(e) => setRates({ ...rates, [c.code]: { rate: rates[c.code]?.rate ?? '', credit: e.target.value } })} /></Td>
+            </tr>
+          ))}
+        </Table>
+        {canEdit && <div className="flex gap-2"><Button onClick={() => void save()} disabled={!from}>Save election</Button>{reg.quickMethodFrom && <Button variant="outline" onClick={() => void save(true)}>Stop using the Quick Method</Button>}</div>}
+      </fieldset>
+    </CardContent></Card>
+  );
+}
+
 export default function TaxesPage() {
-  const { companyId } = useCompany();
+  const { companyId, can } = useCompany();
   const { data, error } = useApi<Code[]>(`/companies/${companyId}/tax-codes`);
   return (
     <div className="space-y-4">
@@ -29,6 +82,7 @@ export default function TaxesPage() {
             </tr>
           )))}
       </Table>
+      <QuickMethod companyId={companyId} codes={data ?? []} canEdit={can('taxes:create')} />
     </div>
   );
 }

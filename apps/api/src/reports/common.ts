@@ -4,6 +4,7 @@ import { col, row, type Report, type Row, type Section } from '@ca/reporting';
 import { PrismaService } from '../prisma.service';
 import { currentFiscalYear, isoDate } from '../companies/fiscal-year';
 import { isoOf, toDate } from '../accounting/setup';
+import { CLOSING_SOURCES } from '../accounting/ledger.service';
 
 export const D = (v: Decimal.Value | { toString(): string }) => new Decimal(v.toString());
 export const m2 = (d: Decimal) => d.toFixed(2);
@@ -38,10 +39,15 @@ export async function fiscalYearBounds(c: Ctx, date: string) {
 
 export type Bal = { debit: Decimal; credit: Decimal };
 /** Σ debit / credit per account over POSTED entries in [from, to] (both inclusive; from optional). */
-export async function balances(c: Ctx, o: { from?: string; to: string }, db: Prisma.TransactionClient | PrismaService = c.prisma): Promise<Map<string, Bal>> {
+/**
+ * Per-account debit/credit totals of posted entries.
+ * `excludeClosing` leaves out year-end close/reopen journals. Use it for anything that measures a period's performance
+ * (P&L, cash flow, expense and revenue reports); balance-sheet style figures keep them.
+ */
+export async function balances(c: Ctx, o: { from?: string; to: string; excludeClosing?: boolean }, db: Prisma.TransactionClient | PrismaService = c.prisma): Promise<Map<string, Bal>> {
   const rows = await db.journalLine.groupBy({
     by: ['accountId'],
-    where: { companyId: c.companyId, entry: { status: 'POSTED', date: { ...(o.from ? { gte: toDate(o.from) } : {}), lte: toDate(o.to) } } },
+    where: { companyId: c.companyId, entry: { status: 'POSTED', date: { ...(o.from ? { gte: toDate(o.from) } : {}), lte: toDate(o.to) }, ...(o.excludeClosing ? { sourceType: { notIn: [...CLOSING_SOURCES] } } : {}) } },
     _sum: { debit: true, credit: true },
   });
   return new Map(rows.map((r) => [r.accountId, { debit: D(r._sum.debit ?? 0), credit: D(r._sum.credit ?? 0) }]));

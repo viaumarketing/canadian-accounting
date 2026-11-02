@@ -25,6 +25,8 @@ export const updateAccountSchema = z.object({
   description: z.string().max(500).nullable().optional(),
   isActive: z.boolean().optional(),
   parentId: uuid.nullable().optional(),
+  /** Statement of cash flows section for balance-sheet accounts; null = default (equity → financing, others → operating). */
+  cashFlow: z.enum(['OPERATING', 'INVESTING', 'FINANCING']).nullable().optional(),
 });
 
 export const journalLineInput = z.object({
@@ -106,3 +108,15 @@ export const decideExpenseSchema = z.object({ note: z.string().max(300).optional
 
 export const createFiscalYearSchema = z.object({ startDate: isoDate.optional() });
 export const lockPeriodSchema = z.object({ locked: z.boolean() });
+
+/** A rate as a fraction with up to 4 decimals (e.g. 0.044 for 4.4%). Quick Method rates are well under 20%. */
+const fraction = z.string().regex(/^0(\.\d{1,4})?$/, 'Use a fraction like 0.044 for 4.4%').refine((v) => Number(v) < 0.2, 'Quick Method rates are below 20%');
+/**
+ * GST/HST Quick Method (CRA guide RC4058). `from` = first day the election is in effect (null turns it off).
+ * `rates` maps a sales tax code to its remittance rate and, for 0%-rate supplies, the credit rate. Codes without a rate are
+ * treated as supplies not eligible for the Quick Method calculation (their GST/HST is reported in full).
+ */
+export const quickMethodSchema = z.object({
+  from: isoDate.nullable(),
+  rates: z.record(z.string().regex(/^[A-Z0-9_]{1,40}$/), z.object({ rate: fraction, credit: fraction.optional() })).default({}),
+});

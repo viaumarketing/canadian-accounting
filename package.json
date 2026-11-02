@@ -22,9 +22,9 @@
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "eslint": "^9.39.5",
-    "prettier": "^3.6.2",
+    "prettier": "^3.9.10",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.0"
+    "typescript-eslint": "^8.72.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -49,7 +49,6 @@
     "auditConfig": {
       "ignoreGhsas": [
         "GHSA-ggr8-5vv4-36mx",
-        "GHSA-mrhx-c7xc-m3w5",
         "GHSA-g3hv-75wg-m249"
       ]
     }

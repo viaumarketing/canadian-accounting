@@ -9,7 +9,7 @@ import { api, errorMessage } from '@/lib/api';
 import { fmtMoney, today, useCompany } from '@/lib/company';
 import { useApi } from '@/lib/use-api';
 
-interface Account { id: string; code: string; name: string; type: string; role: string | null }
+interface Account { id: string; code: string; name: string; type: string; role: string | null; cashFlow: 'OPERATING' | 'INVESTING' | 'FINANCING' | null }
 interface Journal { id: string; number: number | null; date: string; memo: string | null; status: string; sourceType: string; lines: { id: string; debit: string; credit: string; account: { code: string; name: string } }[] }
 
 function Chart({ companyId, canEdit }: { companyId: string; canEdit: boolean }) {
@@ -20,11 +20,29 @@ function Chart({ companyId, canEdit }: { companyId: string; canEdit: boolean }) 
     e.preventDefault(); setErr(null);
     try { await api(`/companies/${companyId}/accounts`, { method: 'POST', body: f }); setF({ ...f, code: '', name: '' }); await reload(); } catch (x) { setErr(errorMessage(x)); }
   }
+  async function setCashFlow(a: Account, v: string) {
+    setErr(null);
+    try { await api(`/companies/${companyId}/accounts/${a.id}`, { method: 'PATCH', body: { cashFlow: v || null } }); await reload(); } catch (x) { setErr(errorMessage(x)); }
+  }
+  const flowDefault = (a: Account) => (a.type === 'EQUITY' ? 'financing' : 'operating');
   return (
     <div className="space-y-4">
       <FormError message={err ?? (error ? errorMessage(error) : null)} />
-      <Table head={['Code', 'Name', 'Type', '']}>
-        {(data ?? []).map((a) => <tr key={a.id}><Td mono>{a.code}</Td><Td>{a.name}</Td><Td>{a.type.toLowerCase()}</Td><Td>{a.role && <Badge>system</Badge>}</Td></tr>)}
+      <Table head={['Code', 'Name', 'Type', 'Cash-flow section', '']}>
+        {(data ?? []).map((a) => (
+          <tr key={a.id}>
+            <Td mono>{a.code}</Td><Td>{a.name}</Td><Td>{a.type.toLowerCase()}</Td>
+            <Td>
+              {a.type === 'REVENUE' || a.type === 'EXPENSE' ? <span className="text-xs text-muted-foreground">in net income</span>
+                : canEdit ? (
+                  <Select aria-label={`Cash-flow section for ${a.code} ${a.name}`} value={a.cashFlow ?? ''} onChange={(e) => void setCashFlow(a, e.target.value)} className="h-8 text-xs">
+                    <option value="">Default ({flowDefault(a)})</option><option value="OPERATING">Operating</option><option value="INVESTING">Investing</option><option value="FINANCING">Financing</option>
+                  </Select>
+                ) : <span className="text-xs">{a.cashFlow ? a.cashFlow.toLowerCase() : `default (${flowDefault(a)})`}</span>}
+            </Td>
+            <Td>{a.role && <Badge>system</Badge>}</Td>
+          </tr>
+        ))}
       </Table>
       {canEdit && (
         <Card><CardHeader><CardTitle>Add account</CardTitle></CardHeader><CardContent>
@@ -102,6 +120,63 @@ function Journals({ companyId, accounts, canCreate, canPost, canReverse }: { com
   );
 }
 
+interface FiscalYear { id: string; label: string; startDate: string; endDate: string; status: 'OPEN' | 'CLOSED'; closedAt: string | null }
+interface ClosePreview { netIncome: string; lines: { accountId: string; debit: string; credit: string; account: { code: string; name: string } }[]; blockers: { code: string; message: string }[] }
+
+/** Year-end close: review what will be posted, close (locks the year), or reopen the most recent closed year. */
+function YearEnd({ companyId, canClose, canReopen }: { companyId: string; canClose: boolean; canReopen: boolean }) {
+  const { data, reload, error } = useApi<FiscalYear[]>(`/companies/${companyId}/fiscal-years`);
+  const [sel, setSel] = useState<string | null>(null);
+  const { data: pv, reload: reloadPv } = useApi<ClosePreview>(sel ? `/companies/${companyId}/fiscal-years/${sel}/close-preview` : null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const years = data ?? [];
+  const lastClosed = [...years].reverse().find((y) => y.status === 'CLOSED');
+  const firstOpen = years.find((y) => y.status === 'OPEN');
+  async function run(id: string, action: 'close' | 'reopen') {
+    const y = years.find((x) => x.id === id)!;
+    const msg = action === 'close'
+      ? `Close ${y.label}? A closing entry moves this year's profit to Retained Earnings and every period of the year is locked.`
+      : `Reopen ${y.label}? The closing entry is reversed. Periods stay locked until you unlock the ones you need.`;
+    if (!window.confirm(msg)) return;
+    setErr(null); setBusy(true);
+    try { await api(`/companies/${companyId}/fiscal-years/${id}/${action}`, { method: 'POST', body: {} }); setSel(null); await reload(); } catch (x) { setErr(errorMessage(x)); } finally { setBusy(false); }
+  }
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">Closing a year moves its revenue and expenses into Retained Earnings and locks it. Years close oldest first and reopen newest first. Reports still show a closed year's profit.</p>
+      <FormError message={err ?? (error ? errorMessage(error) : null)} />
+      <Table head={['Year', 'From', 'To', 'Status', '']}>
+        {years.map((y) => (
+          <tr key={y.id}>
+            <Td>{y.label}</Td><Td>{y.startDate.slice(0, 10)}</Td><Td>{y.endDate.slice(0, 10)}</Td>
+            <Td><Badge tone={y.status === 'CLOSED' ? 'neutral' : 'success'}>{y.status === 'CLOSED' ? `closed ${y.closedAt?.slice(0, 10) ?? ''}` : 'open'}</Badge></Td>
+            <Td>
+              {y.status === 'OPEN' && y.id === firstOpen?.id && <Button size="sm" variant="outline" onClick={() => { setSel(y.id); void reloadPv(); }}>Review close</Button>}
+              {y.status === 'CLOSED' && y.id === lastClosed?.id && canReopen && <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(y.id, 'reopen')}>Reopen</Button>}
+            </Td>
+          </tr>
+        ))}
+      </Table>
+      {sel && pv && (
+        <Card><CardHeader><CardTitle>Closing entry for {years.find((y) => y.id === sel)?.label}</CardTitle></CardHeader><CardContent className="space-y-3">
+          {pv.blockers.length > 0 && <ul className="list-disc pl-5 text-sm text-destructive">{pv.blockers.map((b) => <li key={b.code}>{b.message}</li>)}</ul>}
+          {pv.lines.length === 0 ? <p className="text-sm text-muted-foreground">No revenue or expenses in this year: it closes without a journal entry.</p> : (
+            <Table head={['Account', 'Debit', 'Credit']} right={[1, 2]}>
+              {pv.lines.map((l) => <tr key={l.accountId}><Td>{l.account.code} · {l.account.name}</Td><Td right>{l.debit !== '0' ? fmtMoney(l.debit) : ''}</Td><Td right>{l.credit !== '0' ? fmtMoney(l.credit) : ''}</Td></tr>)}
+            </Table>
+          )}
+          <p className="text-sm">Net {Number(pv.netIncome) < 0 ? 'loss' : 'income'} moved to Retained Earnings: <strong>{fmtMoney(pv.netIncome.replace('-', ''))}</strong></p>
+          <div className="flex gap-2">
+            {canClose && <Button disabled={busy || pv.blockers.length > 0} onClick={() => void run(sel, 'close')}>Close year</Button>}
+            <Button variant="outline" onClick={() => setSel(null)}>Cancel</Button>
+          </div>
+        </CardContent></Card>
+      )}
+    </div>
+  );
+}
+
 interface TB { rows: { accountId: string; code: string; name: string; debit: string; credit: string }[]; totals: { debit: string; credit: string; balanced: boolean } }
 function TrialBalance({ companyId }: { companyId: string }) {
   const [asOf, setAsOf] = useState(today());
@@ -127,10 +202,11 @@ export default function AccountingPage() {
     <div className="space-y-4">
       <PageTitle>Accounting</PageTitle>
       <Tabs defaultValue="journal">
-        <TabsList><TabsTrigger value="journal">Journal</TabsTrigger><TabsTrigger value="chart">Chart of accounts</TabsTrigger><TabsTrigger value="tb">Trial balance</TabsTrigger></TabsList>
+        <TabsList><TabsTrigger value="journal">Journal</TabsTrigger><TabsTrigger value="chart">Chart of accounts</TabsTrigger><TabsTrigger value="tb">Trial balance</TabsTrigger><TabsTrigger value="year-end">Year-end</TabsTrigger></TabsList>
         <TabsContent value="journal"><Journals companyId={companyId} accounts={accounts ?? []} canCreate={can('journal:create')} canPost={can('journal:post')} canReverse={can('journal:reverse')} /></TabsContent>
         <TabsContent value="chart"><Chart companyId={companyId} canEdit={can('accounts:create')} /></TabsContent>
         <TabsContent value="tb">{can('reports:view') ? <TrialBalance companyId={companyId} /> : <FormError message="You do not have access to reports." />}</TabsContent>
+        <TabsContent value="year-end"><YearEnd companyId={companyId} canClose={can('journal:approve')} canReopen={can('journal:reverse')} /></TabsContent>
       </Tabs>
     </div>
   );
