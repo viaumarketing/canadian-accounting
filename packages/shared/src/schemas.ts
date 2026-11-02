@@ -64,7 +64,13 @@ export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
 
 export const updateCompanySchema = createCompanySchema
   .omit({ ownerEmail: true, ownerName: true, ownerTemporaryPassword: true, baseCurrency: true })
-  .partial();
+  .partial()
+  .extend({
+    /** Printed on invoices and sales receipts */
+    address: z.string().trim().max(500).nullable().optional(),
+    phone: z.string().trim().max(40).nullable().optional(),
+    email: z.string().trim().email().max(200).nullable().optional(),
+  });
 export type UpdateCompanyInput = z.infer<typeof updateCompanySchema>;
 
 export const inviteMemberSchema = z.object({

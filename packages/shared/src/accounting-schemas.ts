@@ -51,6 +51,15 @@ export const createContactSchema = z.object({
   email: z.string().trim().email().optional(),
   province: z.string().length(2).toUpperCase().optional(),
   taxNumber: z.string().max(40).optional(),
+  billingAddress: z.string().trim().max(500).optional(),
+  phone: z.string().trim().max(40).optional(),
+  defaultTerms: z.enum(['DUE_ON_RECEIPT', 'NET_15', 'NET_30', 'NET_60']).optional(),
+});
+export const updateContactSchema = createContactSchema.omit({ kind: true }).partial().extend({
+  email: z.string().trim().email().nullable().optional(),
+  billingAddress: z.string().trim().max(500).nullable().optional(),
+  phone: z.string().trim().max(40).nullable().optional(),
+  isActive: z.boolean().optional(),
 });
 
 export const taxRateSchema = z.object({
@@ -68,6 +77,9 @@ const docLine = z.object({
   unitPrice: amountString,
   accountId: uuid,
   taxCodeId: uuid,
+  /** Product/service the line was picked from (its income account and tax code are still sent explicitly). */
+  itemId: uuid.optional(),
+  serviceDate: isoDate.optional(),
 });
 const docBase = {
   contactId: uuid,
@@ -77,7 +89,50 @@ const docBase = {
   kind: z.enum(['STANDARD', 'CREDIT']).default('STANDARD'),
   lines: z.array(docLine).min(1).max(200),
 };
-export const createInvoiceSchema = z.object(docBase);
+export const PAYMENT_TERMS = ['DUE_ON_RECEIPT', 'NET_15', 'NET_30', 'NET_60'] as const;
+export const createInvoiceSchema = z.object({
+  ...docBase,
+  terms: z.enum(PAYMENT_TERMS).optional(),
+  billingAddress: z.string().trim().max(500).optional(),
+  /** Printed on the invoice */
+  message: z.string().trim().max(1000).optional(),
+  /** Internal, not printed */
+  memo: z.string().trim().max(1000).optional(),
+});
+
+export const PAYMENT_METHODS = ['CASH', 'CHEQUE', 'CREDIT_CARD', 'DEBIT_CARD', 'E_TRANSFER', 'OTHER'] as const;
+export const createSalesReceiptSchema = z.object({
+  contactId: uuid,
+  date: isoDate,
+  paymentMethod: z.enum(PAYMENT_METHODS).default('OTHER'),
+  referenceNo: z.string().trim().max(60).optional(),
+  /** Bank or cash account the money goes into */
+  depositAccountId: uuid,
+  taxInclusive: z.boolean().default(false),
+  lines: z.array(docLine).min(1).max(200),
+  billingAddress: z.string().trim().max(500).optional(),
+  message: z.string().trim().max(1000).optional(),
+  memo: z.string().trim().max(1000).optional(),
+  /** true = post immediately (needs sales:post) */
+  post: z.boolean().default(false),
+});
+
+export const itemSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  sku: z.string().trim().max(60).optional(),
+  type: z.enum(['SERVICE', 'NON_INVENTORY']).default('SERVICE'),
+  description: z.string().trim().max(300).optional(),
+  rate: amountString.optional(),
+  incomeAccountId: uuid,
+  taxCodeId: uuid.optional(),
+});
+export const updateItemSchema = itemSchema.partial().extend({
+  sku: z.string().trim().max(60).nullable().optional(),
+  description: z.string().trim().max(300).nullable().optional(),
+  rate: amountString.nullable().optional(),
+  taxCodeId: uuid.nullable().optional(),
+  isActive: z.boolean().optional(),
+});
 export const createBillSchema = z.object({ ...docBase, supplierRef: z.string().max(60).optional() });
 
 export const createPaymentSchema = z.object({

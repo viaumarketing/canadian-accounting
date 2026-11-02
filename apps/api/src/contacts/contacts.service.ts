@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@ca/database';
 import { PrismaService } from '../prisma.service';
 import { AuditService } from '../audit/audit.service';
 
@@ -13,9 +14,16 @@ export class ContactsService {
     });
   }
 
-  async create(companyId: string, input: { kind: 'CUSTOMER' | 'VENDOR' | 'BOTH'; name: string; email?: string; province?: string; taxNumber?: string }, actorId: string, ip: string | null) {
+  async create(companyId: string, input: { kind: 'CUSTOMER' | 'VENDOR' | 'BOTH'; name: string; email?: string; province?: string; taxNumber?: string; billingAddress?: string; phone?: string; defaultTerms?: string }, actorId: string, ip: string | null) {
     const c = await this.prisma.contact.create({ data: { ...input, companyId } });
     await this.audit.record({ action: 'contact.created', companyId, actorId, entityType: 'Contact', entityId: c.id, ip });
+    return c;
+  }
+
+  async update(companyId: string, id: string, input: { name?: string; email?: string | null; province?: string; taxNumber?: string; billingAddress?: string | null; phone?: string | null; defaultTerms?: string; isActive?: boolean }, actorId: string, ip: string | null) {
+    await this.get(companyId, id);
+    const c = await this.prisma.contact.update({ where: { id }, data: input });
+    await this.audit.record({ action: 'contact.updated', companyId, actorId, entityType: 'Contact', entityId: id, metadata: input as Prisma.InputJsonObject, ip });
     return c;
   }
 

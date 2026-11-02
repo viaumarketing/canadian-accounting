@@ -11,7 +11,7 @@ const GROUPS: Record<TaxKind, { label: string; payable: string; receivable?: str
   pst: { label: 'PST', payable: 'PST_PAYABLE', account: 'tax:PST', components: ['PST'] },
 };
 /** Entry types that collect tax from customers / that claim tax on purchases. Anything else touching a tax account is "other" and is listed, not guessed. */
-const SALES = new Set(['invoice', 'credit_note', 'shopify_order', 'shopify_refund']);
+const SALES = new Set(['invoice', 'credit_note', 'sales_receipt', 'shopify_order', 'shopify_refund']);
 const PURCHASES = new Set(['bill', 'vendor_credit', 'expense']);
 
 interface TaxLineRow { debit: Decimal; credit: Decimal; entryId: string; number: number | null; date: string; memo: string | null; source: string; accountId: string }
@@ -63,10 +63,14 @@ export interface TaxInputs {
 }
 type QMRates = Record<string, { rate: string; credit?: string }>;
 
-/** Invoice/credit-note lines taxed at GST/HST, per tax code: GST/HST-included amount and the GST/HST on it (credit notes negative). */
+/** Invoice/credit-note and sales-receipt lines taxed at GST/HST, per tax code: GST/HST-included amount and the GST/HST on it (credit notes negative). */
 async function gstHstSalesByCode(c: Ctx, from: string, to: string) {
   if (from > to) return new Map<string, { incl: Decimal; tax: Decimal; name: string }>();
-  const lines = await c.prisma.invoiceLine.findMany({ where: { companyId: c.companyId, invoice: { issueDate: { gte: toDate(from), lte: toDate(to) }, status: { in: ['POSTED', 'PARTIAL', 'PAID'] } } }, include: { invoice: { select: { kind: true } }, taxCode: { select: { code: true, name: true } } } });
+  const [invLines, recLines] = await Promise.all([
+    c.prisma.invoiceLine.findMany({ where: { companyId: c.companyId, invoice: { issueDate: { gte: toDate(from), lte: toDate(to) }, status: { in: ['POSTED', 'PARTIAL', 'PAID'] } } }, include: { invoice: { select: { kind: true } }, taxCode: { select: { code: true, name: true } } } }),
+    c.prisma.salesReceiptLine.findMany({ where: { companyId: c.companyId, receipt: { date: { gte: toDate(from), lte: toDate(to) }, status: 'PAID' } }, include: { taxCode: { select: { code: true, name: true } } } }),
+  ]);
+  const lines = [...invLines, ...recLines.map((l) => ({ ...l, invoice: { kind: 'STANDARD' as const } }))];
   const m = new Map<string, { incl: Decimal; tax: Decimal; name: string }>();
   for (const l of lines) {
     const tax = (l.taxDetail as { component: string; amount: string }[]).filter((t) => t.component === 'GST' || t.component === 'HST').reduce((a, t) => a.plus(t.amount), D(0));
@@ -158,7 +162,7 @@ export async function taxReport(c: Ctx, kind: TaxKind, p: { from: string; to: st
       const invoiceTax = [...cur.values()].reduce((a, v) => a.plus(v.tax), D(0));
       const unexplained = pos.collected.minus(invoiceTax);
       if (!unexplained.isZero()) {
-        r.checks.push({ label: 'All GST/HST-taxed sales are in the Quick Method calculation', ok: !otherSales.isZero(), detail: `${m2(unexplained)} of GST/HST was collected outside invoices (Shopify orders, bank receipts). Enter those sales including GST/HST and their remittance rate in "Other eligible sales".` });
+        r.checks.push({ label: 'All GST/HST-taxed sales are in the Quick Method calculation', ok: !otherSales.isZero(), detail: `${m2(unexplained)} of GST/HST was collected outside invoices and sales receipts (Shopify orders, bank receipts). Enter those sales including GST/HST and their remittance rate in "Other eligible sales".` });
       }
       r.notes.push(`Quick Method in effect since ${qmFrom}. Remittance rates are the ones you recorded for each tax code (from the RC4058 rate charts); the system does not choose them. Invoices with a tax code that has no Quick Method rate are treated as supplies not eligible for the calculation, and their GST/HST is reported in full.`);
     }
@@ -233,8 +237,9 @@ async function schedules(c: Ctx, kind: TaxKind, p: { from: string; to: string },
   const range = { gte: toDate(p.from), lte: toDate(p.to) };
   const okStatus = { in: ['POSTED', 'PARTIAL', 'PAID'] as ('POSTED' | 'PARTIAL' | 'PAID')[] };
   type Detail = { component: string; amount: string; recoverable: boolean }[];
-  const [inv, bill, exp] = await Promise.all([
+  const [invOnly, rec, bill, exp] = await Promise.all([
     c.prisma.invoiceLine.findMany({ where: { companyId: c.companyId, invoice: { issueDate: range, status: okStatus } }, include: { invoice: { select: { kind: true } }, taxCode: { select: { code: true, name: true } } } }),
+    c.prisma.salesReceiptLine.findMany({ where: { companyId: c.companyId, receipt: { date: range, status: 'PAID' } }, include: { taxCode: { select: { code: true, name: true } } } }),
     c.prisma.billLine.findMany({ where: { companyId: c.companyId, bill: { issueDate: range, status: okStatus } }, include: { bill: { select: { kind: true } }, taxCode: { select: { code: true, name: true } } } }),
     c.prisma.expenseLine.findMany({ where: { companyId: c.companyId, expense: { date: range, status: 'POSTED' } }, include: { taxCode: { select: { code: true, name: true } } } }),
   ]);
@@ -248,6 +253,7 @@ async function schedules(c: Ctx, kind: TaxKind, p: { from: string; to: string },
     });
     return m;
   };
+  const inv = [...invOnly, ...rec.map((l) => ({ ...l, invoice: { kind: 'STANDARD' as const } }))];
   const sales = sum(inv, (i) => (inv[i].invoice.kind === 'CREDIT' ? -1 : 1), false);
   const purch = new Map<string, { base: Decimal; tax: Decimal; name: string }>();
   for (const [k, v] of [...sum(bill, (i) => (bill[i].bill.kind === 'CREDIT' ? -1 : 1), true), ...sum(exp, () => 1, true)]) { const e = purch.get(k) ?? { base: D(0), tax: D(0), name: v.name }; e.base = e.base.plus(v.base); e.tax = e.tax.plus(v.tax); purch.set(k, e); }
@@ -257,7 +263,7 @@ async function schedules(c: Ctx, kind: TaxKind, p: { from: string; to: string },
     r.sections.push({ title, columns: [col('code', 'Tax code'), col('name', 'Description'), col('base', 'Amount before tax', 'money'), col('tax', taxLabel, 'money')], rows, totals: [row({ name: 'Total', base: m2(tb), tax: m2(tt) }, { bold: true })] });
     return tt;
   };
-  const docSales = sched('Schedule: sales documents by tax code (invoices less credit notes)', sales, `${g.label} collected`);
+  const docSales = sched('Schedule: sales documents by tax code (invoices and sales receipts, less credit notes)', sales, `${g.label} collected`);
   const docItc = g.receivable ? sched('Schedule: purchase documents and expenses by tax code', purch, `${g.label} recoverable`) : D(0);
 
   // Shopify orders by tax title, mapped with the same rule the posting engine uses.

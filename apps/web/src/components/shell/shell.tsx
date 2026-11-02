@@ -1,53 +1,132 @@
 'use client';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ChevronsUpDown, LogOut, Menu as MenuIcon, Moon, PanelLeftClose, PanelLeftOpen, ShieldCheck, Sun, Building2, Check } from 'lucide-react';
+import * as M from '@radix-ui/react-dropdown-menu';
+import { Building2, Check, ChevronDown, ChevronsUpDown, LogOut, Menu as MenuIcon, Moon, PanelLeftClose, PanelLeftOpen, Plus, Settings, ShieldCheck, Sun } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
-import { roleHasPermission } from '@ca/shared';
-import { NAV } from '@/lib/nav';
+import { roleHasPermission, type CompanyRole, type Permission } from '@ca/shared';
+import { NAV, sectionOf } from '@/lib/nav';
 import { useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from '@/components/ui/menu';
 
+function useRole(companyId: string | null) {
+  const { me } = useSession();
+  return me.companies.find((c) => c.id === companyId)?.role as CompanyRole | undefined;
+}
+
 function NavList({ companyId, collapsed, onNavigate }: { companyId: string | null; collapsed: boolean; onNavigate?: () => void }) {
   const pathname = usePathname();
-  const { me } = useSession();
-  const role = me.companies.find((c) => c.id === companyId)?.role;
+  const role = useRole(companyId);
   if (!companyId || !role) return null;
+  const open = sectionOf(pathname);
+  const link = 'flex items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground/85 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
   return (
     <nav aria-label="Main" className="flex flex-col gap-0.5 px-2">
       {NAV.filter((n) => roleHasPermission(role, n.permission)).map((n) => {
-        const href = `/c/${companyId}/${n.slug}`;
-        const active = pathname === href;
+        const kids = (n.children ?? []).filter((k) => roleHasPermission(role, k.permission));
+        const isOpen = open === n.slug;
+        const href = `/c/${companyId}/${kids[0]?.href ?? n.slug}`;
         return (
-          <Link
-            key={n.slug}
-            href={href}
-            onClick={onNavigate}
-            aria-current={active ? 'page' : undefined}
-            title={collapsed ? n.label : undefined}
-            className={cn(
-              'flex items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              active && 'bg-white/10 font-medium text-white',
-              collapsed && 'justify-center px-2',
+          <div key={n.slug}>
+            <Link
+              href={href}
+              onClick={onNavigate}
+              aria-current={!kids.length && isOpen ? 'page' : undefined}
+              aria-expanded={kids.length && !collapsed ? isOpen : undefined}
+              title={collapsed ? n.label : undefined}
+              className={cn(link, isOpen && 'bg-white/10 font-medium text-white', collapsed && 'justify-center px-2')}
+            >
+              <n.icon className="h-4 w-4 shrink-0" aria-hidden />
+              {!collapsed && <span className="flex-1">{n.label}</span>}
+              {!collapsed && kids.length > 0 && <ChevronDown className={cn('h-3.5 w-3.5 opacity-60 transition-transform', !isOpen && '-rotate-90')} aria-hidden />}
+            </Link>
+            {!collapsed && isOpen && kids.length > 0 && (
+              <ul className="mb-1 mt-0.5 space-y-0.5 pl-9">
+                {kids.map((k) => {
+                  const kHref = `/c/${companyId}/${k.href}`;
+                  const active = pathname === kHref || (k.href !== n.slug && k.href.includes('/') && pathname.startsWith(`${kHref}/`));
+                  return (
+                    <li key={k.href}>
+                      <Link href={kHref} onClick={onNavigate} aria-current={active ? 'page' : undefined}
+                        className={cn('block rounded-md px-3 py-1.5 text-[13px] text-sidebar-foreground/75 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', active && 'bg-white/15 font-medium text-white')}>
+                        {k.label}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
             )}
-          >
-            <n.icon className="h-4 w-4 shrink-0" aria-hidden />
-            {!collapsed && <span>{n.label}</span>}
-          </Link>
+          </div>
         );
       })}
     </nav>
   );
 }
 
+/** "+ New": everything you can create, grouped by who it is with, in one place. */
+const NEW_MENU: { group: string; items: { label: string; href: string; permission: Permission }[] }[] = [
+  { group: 'Customers', items: [
+    { label: 'Invoice', href: 'sales/invoices/new', permission: 'sales:create' },
+    { label: 'Receive payment', href: 'sales/invoices?status=open', permission: 'sales:post' },
+    { label: 'Sales receipt', href: 'sales/receipts/new', permission: 'sales:create' },
+    { label: 'Credit note', href: 'sales/invoices/new?kind=credit', permission: 'sales:create' },
+    { label: 'Customer', href: 'sales/customers?new=1', permission: 'sales:create' },
+  ] },
+  { group: 'Suppliers', items: [
+    { label: 'Expense', href: 'expenses', permission: 'expenses:create' },
+    { label: 'Bill', href: 'purchases', permission: 'purchases:create' },
+    { label: 'Supplier', href: 'contacts', permission: 'purchases:create' },
+  ] },
+  { group: 'Other', items: [
+    { label: 'Journal entry', href: 'accounting', permission: 'journal:create' },
+    { label: 'Bank statement import', href: 'banking', permission: 'banking:create' },
+    { label: 'Product or service', href: 'sales/products?new=1', permission: 'sales:create' },
+  ] },
+];
+
+function NewMenu({ companyId, collapsed }: { companyId: string | null; collapsed: boolean }) {
+  const role = useRole(companyId);
+  const router = useRouter();
+  if (!companyId || !role) return null;
+  const groups = NEW_MENU.map((g) => ({ ...g, items: g.items.filter((i) => roleHasPermission(role, i.permission)) })).filter((g) => g.items.length);
+  if (!groups.length) return null;
+  return (
+    <M.Root>
+      <M.Trigger asChild>
+        <button
+          className={cn('mx-3 mb-3 flex items-center justify-center gap-2 rounded-full bg-primary py-2 text-sm font-semibold text-primary-foreground shadow hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', collapsed ? 'mx-2 px-0' : 'px-4')}
+          aria-label="Create new"
+        >
+          <Plus className="h-4 w-4" aria-hidden />{!collapsed && 'New'}
+        </button>
+      </M.Trigger>
+      <M.Portal>
+        <M.Content side="right" align="start" sideOffset={8} className="z-50 grid max-w-[calc(100vw-2rem)] gap-6 rounded-lg border bg-card p-5 text-card-foreground shadow-xl sm:grid-cols-3">
+          {groups.map((g) => (
+            <M.Group key={g.group} className="min-w-40">
+              <M.Label className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.group}</M.Label>
+              {g.items.map((i) => (
+                <M.Item key={i.label} onSelect={() => router.push(`/c/${companyId}/${i.href}`)}
+                  className="cursor-pointer rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground">
+                  {i.label}
+                </M.Item>
+              ))}
+            </M.Group>
+          ))}
+        </M.Content>
+      </M.Portal>
+    </M.Root>
+  );
+}
+
 function Brand({ collapsed }: { collapsed: boolean }) {
   return (
     <div className={cn('flex h-14 items-center gap-2 px-4 text-white', collapsed && 'justify-center px-2')}>
-      <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground">CA</span>
+      <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">CA</span>
       {!collapsed && <span className="font-semibold tracking-tight">Canadian Accounting</span>}
     </div>
   );
@@ -61,11 +140,11 @@ function CompanySelector({ companyId }: { companyId: string | null }) {
   return (
     <Menu>
       <MenuTrigger asChild>
-        <Button variant="outline" className="max-w-[16rem] justify-between" aria-label="Switch company">
-          <Building2 className="h-4 w-4 shrink-0" aria-hidden />
-          <span className="truncate">{current?.operatingName || current?.legalName || 'Select company'}</span>
+        <button className="flex min-w-0 max-w-[9.5rem] items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[18rem]" aria-label="Switch company">
+          <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="truncate text-sm font-semibold">{current?.operatingName || current?.legalName || 'Select company'}</span>
           <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-60" aria-hidden />
-        </Button>
+        </button>
       </MenuTrigger>
       <MenuContent>
         <MenuLabel>Companies</MenuLabel>
@@ -99,7 +178,7 @@ function UserMenu() {
   return (
     <Menu>
       <MenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Account menu" className="rounded-full bg-secondary text-xs font-semibold">
+        <Button variant="ghost" size="icon" aria-label="Account menu" className="rounded-full bg-primary text-xs font-semibold text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground">
           {initials}
         </Button>
       </MenuTrigger>
@@ -122,6 +201,7 @@ function UserMenu() {
 export function Shell({ companyId, title, children }: { companyId: string | null; title?: string; children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const role = useRole(companyId);
   useEffect(() => {
     try {
       setCollapsed(localStorage.getItem('ca.sidebar') === 'collapsed');
@@ -140,7 +220,8 @@ export function Shell({ companyId, title, children }: { companyId: string | null
     <div className="flex min-h-screen">
       <aside className={cn('sticky top-0 hidden h-screen shrink-0 flex-col bg-sidebar text-sidebar-foreground transition-[width] md:flex', collapsed ? 'w-16' : 'w-60')}>
         <Brand collapsed={collapsed} />
-        <div className="flex-1 overflow-y-auto py-2">
+        <NewMenu companyId={companyId} collapsed={collapsed} />
+        <div className="flex-1 overflow-y-auto pb-2">
           <NavList companyId={companyId} collapsed={collapsed} />
         </div>
         <button
@@ -155,27 +236,33 @@ export function Shell({ companyId, title, children }: { companyId: string | null
       <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50 md:hidden" />
-          <Dialog.Content className="fixed inset-y-0 left-0 z-50 w-64 bg-sidebar text-sidebar-foreground md:hidden" aria-describedby={undefined}>
+          <Dialog.Content className="fixed inset-y-0 left-0 z-50 w-64 overflow-y-auto bg-sidebar text-sidebar-foreground md:hidden" aria-describedby={undefined}>
             <Dialog.Title className="sr-only">Navigation</Dialog.Title>
             <Brand collapsed={false} />
+            <NewMenu companyId={companyId} collapsed={false} />
             <NavList companyId={companyId} collapsed={false} onNavigate={() => setMobileOpen(false)} />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b bg-background/90 px-4 backdrop-blur">
+        <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b bg-card px-4 shadow-sm">
           <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open navigation" onClick={() => setMobileOpen(true)}>
             <MenuIcon className="h-5 w-5" />
           </Button>
           <CompanySelector companyId={companyId} />
           {title && <h1 className="ml-2 hidden truncate text-sm font-medium text-muted-foreground sm:block">{title}</h1>}
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {companyId && role && roleHasPermission(role, 'company:view') && (
+              <Link href={`/c/${companyId}/settings`} aria-label="Settings" className="inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <Settings className="h-4 w-4" />
+              </Link>
+            )}
             <ThemeToggle />
             <UserMenu />
           </div>
         </header>
-        <main className="mx-auto w-full max-w-7xl flex-1 p-4 sm:p-6">{children}</main>
+        <main className="mx-auto w-full max-w-[1400px] flex-1 p-4 sm:p-6">{children}</main>
       </div>
     </div>
   );

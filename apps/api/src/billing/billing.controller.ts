@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Put } from '@nestjs/common';
 import { createBillSchema, createExpenseSchema, createInvoiceSchema, createPaymentSchema, decideExpenseSchema, reverseJournalSchema, roleHasPermission } from '@ca/shared';
 import { z } from 'zod';
 import { ZodPipe } from '../common/zod.pipe';
@@ -19,6 +19,8 @@ export class BillingController {
   invoice(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string) { return this.billing.getInvoice(c, id); }
   @RequirePermission('sales:create') @Post('invoices')
   createInvoice(@Param('companyId') c: string, @Body(new ZodPipe(createInvoiceSchema)) b: z.infer<typeof createInvoiceSchema>, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.billing.createInvoice(c, b, u.id, ip); }
+  @RequirePermission('sales:create') @Put('invoices/:id')
+  updateInvoice(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @Body(new ZodPipe(createInvoiceSchema)) b: z.infer<typeof createInvoiceSchema>, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.billing.updateInvoice(c, id, b, u.id, ip); }
   @RequirePermission('sales:post') @Post('invoices/:id/post')
   postInvoice(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @CurrentUser() u: AuthUser, @ClientIp() ip: string | null) { return this.billing.postInvoice(c, id, u.id, ip); }
   @RequirePermission('sales:reverse') @Post('invoices/:id/void')
