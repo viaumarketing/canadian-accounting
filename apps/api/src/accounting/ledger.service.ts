@@ -77,7 +77,7 @@ export class LedgerService {
       data: {
         companyId: p.companyId, date, memo: p.memo, sourceType: p.sourceType, sourceId: p.sourceId,
         reversalOfId: p.reversalOfId, createdById: p.actorId,
-        lines: { create: p.lines.map((l, i) => ({ companyId: p.companyId, lineNo: i + 1, accountId: l.accountId, debit: l.debit, credit: l.credit, memo: l.memo, contactId: l.contactId ?? undefined })) },
+        lines: { create: p.lines.map((l, i) => ({ companyId: p.companyId, lineNo: i + 1, accountId: l.accountId, debit: l.debit, credit: l.credit, memo: l.memo, contactId: l.contactId ?? undefined, classId: l.classId ?? undefined, locationId: l.locationId ?? undefined, projectId: l.projectId ?? undefined })) },
       },
     });
     const number = await this.nextNumber(tx, p.companyId, 'journal');

@@ -7,6 +7,7 @@ import { loadConfig } from './config';
 import { QUEUE_NAME } from './shopify/queue';
 import { ShopifySyncService } from './shopify/sync.service';
 import { ConnectionsService } from './banking/connections.service';
+import { AutomationService } from './billing/automation.service';
 import { PrismaService } from './prisma.service';
 import { schemaCompat } from './common/schema-compat';
 import { ResourcesService } from './admin/resources.service';
@@ -24,6 +25,7 @@ export async function startWorkers() {
   if (!compat.ok) throw new Error(`Database schema level ${compat.database} is newer than this worker supports (${compat.app}); refusing to run jobs.`);
   const sync = app.get(ShopifySyncService);
   const bank = app.get(ConnectionsService);
+  const automation = app.get(AutomationService);
   const connection = new IORedis(config.REDIS_URL, { maxRetriesPerRequest: null });
   const queue = new Queue(QUEUE_NAME, { connection });
 
@@ -32,6 +34,8 @@ export async function startWorkers() {
     async (job) => {
       if (job.name === 'schedule') return sync.scheduleAll();
       if (job.name === 'bank-sync') return bank.syncAll();
+      // Recurring transactions, late fees and overdue reminders (each idempotent; safe to run again after a crash).
+      if (job.name === 'automation') return automation.runAll();
       if (job.name === 'sync') return sync.runJob(job.data.jobId as string, { finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1) });
       throw new Error(`Unknown job ${job.name}`);
     },
@@ -66,6 +70,7 @@ export async function startWorkers() {
   }, 15_000);
   await queue.upsertJobScheduler('schedule-incremental', { every: 15 * 60_000 }, { name: 'schedule' });
   await queue.upsertJobScheduler('schedule-bank-sync', { every: 60 * 60_000 }, { name: 'bank-sync' });
+  await queue.upsertJobScheduler('schedule-automation', { every: 60 * 60_000 }, { name: 'automation' });
 
   return {
     async stop() {

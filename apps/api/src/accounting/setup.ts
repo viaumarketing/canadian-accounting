@@ -1,6 +1,7 @@
 import { Prisma, AccountRole, AccountType } from '@ca/database';
 import { SEED_TAX_CODES } from '@ca/canadian-tax';
 import { currentFiscalYear } from '../companies/fiscal-year';
+import { ensureSpecialAccount } from './special-accounts';
 
 interface TemplateAccount { code: string; name: string; type: AccountType; role?: AccountRole; cashFlow?: 'INVESTING' | 'FINANCING' }
 
@@ -111,5 +112,6 @@ export async function seedAccounting(tx: Prisma.TransactionClient, companyId: st
       skipDuplicates: true,
     });
   }
+  await ensureSpecialAccount(tx, companyId, 'UNDEPOSITED_FUNDS');
   await ensurePeriods(tx, companyId);
 }

@@ -113,6 +113,16 @@ describe('route inventory', () => {
         'POST /auth/login',
         'GET /shopify/callback',
         'POST /webhooks/shopify',
+        // 1.0.1: edition/plans, SaaS sign-up (404 when self-hosted), Stripe webhooks (signature-checked), customer invoice link (token)
+        'GET /config',
+        'POST /signup',
+        'POST /signup/verify',
+        'POST /signup/resend',
+        'POST /webhooks/stripe-billing',
+        'POST /webhooks/stripe/:accountId',
+        'GET /public/invoices/:token',
+        'GET /public/invoices/:token/pdf',
+        'POST /public/invoices/:token/checkout',
       ].sort(),
     );
   });
@@ -130,7 +140,8 @@ describe('route inventory', () => {
   });
 
   it('webhook routes (CSRF-exempt) are exactly this list', () => {
-    expect(routes.filter((r) => r.skipCsrf).map((r) => `${r.method} ${r.path}`)).toEqual(['POST /webhooks/shopify']);
+    // Each authenticates by an HMAC signature over the raw body instead of a cookie.
+    expect(routes.filter((r) => r.skipCsrf).map((r) => `${r.method} ${r.path}`).sort()).toEqual(['POST /webhooks/shopify', 'POST /webhooks/stripe-billing', 'POST /webhooks/stripe/:accountId'].sort());
   });
 });
 

@@ -80,7 +80,16 @@ const docLine = z.object({
   /** Product/service the line was picked from (its income account and tax code are still sent explicitly). */
   itemId: uuid.optional(),
   serviceDate: isoDate.optional(),
+  /** Tracking (phase 7) and job costing (phase 6) */
+  classId: uuid.optional(),
+  projectId: uuid.optional(),
+  /** Billable time or a billable cost being invoiced (invoices only) */
+  sourceRef: z.object({ type: z.enum(['time', 'bill_line', 'expense_line']), id: uuid }).optional(),
+  /** Bills: re-invoice this cost to a customer later */
+  billable: z.boolean().optional(),
+  billableToId: uuid.optional(),
 });
+export const documentLineSchema = docLine;
 const docBase = {
   contactId: uuid,
   issueDate: isoDate,
@@ -88,6 +97,7 @@ const docBase = {
   taxInclusive: z.boolean().default(false),
   kind: z.enum(['STANDARD', 'CREDIT']).default('STANDARD'),
   lines: z.array(docLine).min(1).max(200),
+  locationId: uuid.optional(),
 };
 export const PAYMENT_TERMS = ['DUE_ON_RECEIPT', 'NET_15', 'NET_30', 'NET_60'] as const;
 export const createInvoiceSchema = z.object({
@@ -113,6 +123,7 @@ export const createSalesReceiptSchema = z.object({
   billingAddress: z.string().trim().max(500).optional(),
   message: z.string().trim().max(1000).optional(),
   memo: z.string().trim().max(1000).optional(),
+  locationId: uuid.optional(),
   /** true = post immediately (needs sales:post) */
   post: z.boolean().default(false),
 });
@@ -125,15 +136,25 @@ export const itemSchema = z.object({
   rate: amountString.optional(),
   incomeAccountId: uuid,
   taxCodeId: uuid.optional(),
+  /** Inventory: quantity on hand is tracked and sales post cost of goods sold at weighted-average cost */
+  trackInventory: z.boolean().optional(),
+  inventoryAccountId: uuid.optional(),
+  cogsAccountId: uuid.optional(),
+  purchaseCost: amountString.optional(),
+  purchaseDescription: z.string().trim().max(300).optional(),
+  reorderPoint: amountString.optional(),
 });
 export const updateItemSchema = itemSchema.partial().extend({
   sku: z.string().trim().max(60).nullable().optional(),
   description: z.string().trim().max(300).nullable().optional(),
   rate: amountString.nullable().optional(),
   taxCodeId: uuid.nullable().optional(),
+  purchaseCost: amountString.nullable().optional(),
+  purchaseDescription: z.string().trim().max(300).nullable().optional(),
+  reorderPoint: amountString.nullable().optional(),
   isActive: z.boolean().optional(),
 });
-export const createBillSchema = z.object({ ...docBase, supplierRef: z.string().max(60).optional() });
+export const createBillSchema = z.object({ ...docBase, supplierRef: z.string().max(60).optional(), memo: z.string().trim().max(1000).optional() });
 
 export const createPaymentSchema = z.object({
   direction: z.enum(['RECEIPT', 'DISBURSEMENT']),
@@ -142,6 +163,7 @@ export const createPaymentSchema = z.object({
   date: isoDate,
   amount: amountString,
   reference: z.string().max(100).optional(),
+  method: z.enum(PAYMENT_METHODS).optional(),
   allocations: z
     .array(z.object({ documentId: uuid, amount: amountString }))
     .min(1)
@@ -155,9 +177,10 @@ export const createExpenseSchema = z.object({
   paidFromAccountId: uuid,
   taxInclusive: z.boolean().default(true),
   lines: z
-    .array(z.object({ description: z.string().trim().min(1).max(300), amount: amountString, accountId: uuid, taxCodeId: uuid }))
+    .array(z.object({ description: z.string().trim().min(1).max(300), amount: amountString, accountId: uuid, taxCodeId: uuid, classId: uuid.optional(), projectId: uuid.optional(), billable: z.boolean().optional(), billableToId: uuid.optional() }))
     .min(1)
     .max(50),
+  locationId: uuid.optional(),
 });
 export const decideExpenseSchema = z.object({ note: z.string().max(300).optional() });
 

@@ -7,6 +7,7 @@ import { ClientIp, CurrentMembership, CurrentUser, RequirePermission } from '../
 import { AuthUser, MembershipContext } from '../auth/auth.types';
 import { SalesService } from './sales.service';
 import { ContactsService } from '../contacts/contacts.service';
+import { DocumentsService } from '../documents/documents.service';
 
 const allSalesQuery = z.object({
   type: z.enum(['invoice', 'credit_note', 'sales_receipt', 'payment']).optional(),
@@ -18,7 +19,7 @@ const allSalesQuery = z.object({
 
 @Controller('companies/:companyId')
 export class SalesController {
-  constructor(private readonly sales: SalesService, private readonly contacts: ContactsService) {}
+  constructor(private readonly sales: SalesService, private readonly contacts: ContactsService, private readonly documents: DocumentsService) {}
 
   // --- all sales + money bar ---
   @RequirePermission('sales:view') @Get('sales/transactions')
@@ -48,7 +49,7 @@ export class SalesController {
   @RequirePermission('sales:view') @Get('sales-receipts/:id/pdf')
   receiptPdf(@Param('companyId') c: string, @Param('id', ParseUUIDPipe) id: string, @Res({ passthrough: true }) res: Response) { return this.pdf(c, 'sales_receipt', id, res); }
   private async pdf(c: string, type: 'invoice' | 'sales_receipt', id: string, res: Response) {
-    const { filename, pdf } = await this.sales.documentPdf(c, type, id);
+    const { filename, pdf } = await this.documents.render(c, type, id);
     res.setHeader('Content-Type', 'application/pdf');
     // inline: opens in the browser's PDF viewer to print; the file name is used if it is saved
     res.setHeader('Content-Disposition', `inline; filename="${filename.replace(/[^\w.-]/g, '_')}"`);

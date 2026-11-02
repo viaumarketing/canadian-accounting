@@ -2,6 +2,8 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   NotFoundException,
@@ -15,6 +17,8 @@ import { PrismaService } from '../prisma.service';
 import { AuthService } from './auth.service';
 import { IS_PUBLIC, PERMISSION, SKIP_CSRF, SUPER_ADMIN_ONLY } from './decorators';
 import { SESSION_COOKIE } from './auth.types';
+import { FEATURE } from '../saas/saas.decorators';
+import { PLANS, writable, type Feature } from '../saas/plans';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const ALLOWED_WHILE_PASSWORD_CHANGE_PENDING = ['/auth/me', '/auth/logout', '/auth/change-password'];
@@ -78,7 +82,7 @@ export class AuthGuard implements CanActivate {
  */
 @Injectable()
 export class CompanyGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector, private readonly prisma: PrismaService) {}
+  constructor(private readonly reflector: Reflector, private readonly prisma: PrismaService, @Inject(CONFIG) private readonly config: AppConfig) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest<Request>();
@@ -90,13 +94,24 @@ export class CompanyGuard implements CanActivate {
 
     const m = await this.prisma.companyMembership.findUnique({
       where: { companyId_userId: { companyId, userId: req.auth.user.id } },
-      include: { company: { select: { isActive: true } } },
+      include: { company: { select: { isActive: true, organization: { select: { plan: true, status: true, trialEndsAt: true, stripeSubscriptionId: true } } } } },
     });
     if (!m || m.status !== 'ACTIVE' || !m.company.isActive) throw notFound();
 
     const needed = this.reflector.getAllAndOverride<Permission | undefined>(PERMISSION, [ctx.getHandler(), ctx.getClass()]);
     if (needed && !roleHasPermission(m.role, needed)) {
       throw new ForbiddenException({ code: 'FORBIDDEN', message: `Missing permission ${needed}` });
+    }
+    // SaaS edition: the subscribing organization's plan and subscription decide what this company may do. Companies with no
+    // organization (created by a platform administrator) and self-hosted installations are not limited.
+    const org = this.config.APP_MODE === 'saas' ? m.company.organization : null;
+    if (org) {
+      const feature = this.reflector.getAllAndOverride<Feature | undefined>(FEATURE, [ctx.getHandler(), ctx.getClass()]);
+      const plan = PLANS[org.plan as keyof typeof PLANS];
+      if (feature && !plan?.features.includes(feature)) throw new ForbiddenException({ code: 'PLAN_FEATURE', message: `Your ${plan?.name ?? org.plan} plan does not include this feature; upgrade in Billing`, feature });
+      if (!SAFE_METHODS.has(req.method) && !writable(org)) {
+        throw new HttpException({ code: 'SUBSCRIPTION_INACTIVE', message: 'Your subscription is not active, so the books are read-only. Renew it in Billing to make changes; everything stays viewable and exportable.' }, HttpStatus.PAYMENT_REQUIRED);
+      }
     }
     req.membership = { companyId, role: m.role };
     return true;

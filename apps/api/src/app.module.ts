@@ -10,6 +10,7 @@ import { CompaniesModule } from './companies/companies.module';
 import { AccountingModule } from './accounting/accounting.module';
 import { ShopifyModule } from './shopify/shopify.module';
 import { BankingModule } from './banking/banking.module';
+import { SaasModule } from './saas/saas.module';
 import { HealthController } from './health/health.controller';
 import { AdminController } from './admin/admin.controller';
 import { AdminService } from './admin/admin.service';
@@ -40,6 +41,7 @@ export function buildAppModule(config: AppConfig = loadConfig()) {
       AccountingModule,
       ShopifyModule,
       BankingModule,
+      SaasModule,
     ],
     controllers: [HealthController, AdminController],
     providers: [

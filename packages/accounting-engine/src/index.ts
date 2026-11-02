@@ -9,7 +9,14 @@ export interface LineInput {
   credit: string;
   memo?: string;
   contactId?: string | null;
+  /** Tracking dimensions, carried through to the journal line (reports group by them) */
+  classId?: string | null;
+  locationId?: string | null;
+  projectId?: string | null;
 }
+
+/** Tracking dimensions a document line carries. */
+export interface Dims { classId?: string | null; locationId?: string | null; projectId?: string | null }
 
 export class UnbalancedEntryError extends Error {}
 
@@ -45,7 +52,7 @@ export interface TaxAccounts {
   pstPayable?: string;
 }
 
-export interface DocLine {
+export interface DocLine extends Dims {
   accountId: string;
   net: string;
   taxes: TaxLine[];
@@ -72,7 +79,7 @@ function receivableAccount(c: TaxLine['component'], a: TaxAccounts): string {
 function compact(lines: LineInput[]): LineInput[] {
   const m = new Map<string, LineInput>();
   for (const l of lines) {
-    const key = `${l.accountId}|${D(l.debit).gt(0) ? 'D' : 'C'}|${l.contactId ?? ''}|${l.memo ?? ''}`;
+    const key = `${l.accountId}|${D(l.debit).gt(0) ? 'D' : 'C'}|${l.contactId ?? ''}|${l.memo ?? ''}|${l.classId ?? ''}|${l.locationId ?? ''}|${l.projectId ?? ''}`;
     const cur = m.get(key);
     if (cur) {
       cur.debit = D(cur.debit).plus(l.debit).toFixed(2);
@@ -91,19 +98,20 @@ const side = (isDebit: boolean, amount: Decimal.Value) => ({
  * Sales invoice (or credit note when `credit`): Dr A/R total; Cr revenue per line; Cr tax payable per component.
  * Credit notes mirror every side.
  */
-export function salesJournal(p: { lines: DocLine[]; receivableId: string; contactId?: string | null; taxAccounts: TaxAccounts; credit?: boolean; memo?: string }): LineInput[] {
+export function salesJournal(p: { lines: DocLine[]; receivableId: string; contactId?: string | null; taxAccounts: TaxAccounts; credit?: boolean; memo?: string; locationId?: string | null }): LineInput[] {
   const flip = Boolean(p.credit); // for a credit note, A/R is credited
   const out: LineInput[] = [];
+  const loc = p.locationId ?? null;
   let total = D(0);
   for (const l of p.lines) {
-    out.push({ accountId: l.accountId, ...side(flip, l.net), memo: l.memo ?? p.memo, contactId: p.contactId });
+    out.push({ accountId: l.accountId, ...side(flip, l.net), memo: l.memo ?? p.memo, contactId: p.contactId, classId: l.classId ?? null, projectId: l.projectId ?? null, locationId: loc });
     total = total.plus(l.net);
     for (const t of l.taxes) {
-      out.push({ accountId: payableAccount(t.component, p.taxAccounts), ...side(flip, t.amount), memo: `${t.component} collected`, contactId: p.contactId });
+      out.push({ accountId: payableAccount(t.component, p.taxAccounts), ...side(flip, t.amount), memo: `${t.component} collected`, contactId: p.contactId, locationId: loc });
       total = total.plus(t.amount);
     }
   }
-  out.push({ accountId: p.receivableId, ...side(!flip, total), memo: p.memo, contactId: p.contactId });
+  out.push({ accountId: p.receivableId, ...side(!flip, total), memo: p.memo, contactId: p.contactId, locationId: loc });
   const res = compact(out);
   assertBalanced(res);
   return res;
@@ -113,22 +121,23 @@ export function salesJournal(p: { lines: DocLine[]; receivableId: string; contac
  * Bill / vendor credit / expense. Recoverable tax → receivable (ITC/ITR) account; non-recoverable tax is added to the
  * line's cost. `counterAccountId` is A/P for bills, or the paid-from account for expenses.
  */
-export function purchaseJournal(p: { lines: DocLine[]; counterAccountId: string; contactId?: string | null; taxAccounts: TaxAccounts; credit?: boolean; memo?: string }): LineInput[] {
+export function purchaseJournal(p: { lines: DocLine[]; counterAccountId: string; contactId?: string | null; taxAccounts: TaxAccounts; credit?: boolean; memo?: string; locationId?: string | null }): LineInput[] {
   const flip = Boolean(p.credit); // vendor credit: expense side credited, A/P debited
   const out: LineInput[] = [];
+  const loc = p.locationId ?? null;
   let total = D(0);
   for (const l of p.lines) {
     let cost = D(l.net);
     for (const t of l.taxes) {
       if (t.recoverable) {
-        out.push({ accountId: receivableAccount(t.component, p.taxAccounts), ...side(!flip, t.amount), memo: `${t.component} recoverable`, contactId: p.contactId });
+        out.push({ accountId: receivableAccount(t.component, p.taxAccounts), ...side(!flip, t.amount), memo: `${t.component} recoverable`, contactId: p.contactId, locationId: loc });
       } else cost = cost.plus(t.amount);
       total = total.plus(t.amount);
     }
-    out.push({ accountId: l.accountId, ...side(!flip, cost), memo: l.memo ?? p.memo, contactId: p.contactId });
+    out.push({ accountId: l.accountId, ...side(!flip, cost), memo: l.memo ?? p.memo, contactId: p.contactId, classId: l.classId ?? null, projectId: l.projectId ?? null, locationId: loc });
     total = total.plus(l.net);
   }
-  out.push({ accountId: p.counterAccountId, ...side(flip, total), memo: p.memo, contactId: p.contactId });
+  out.push({ accountId: p.counterAccountId, ...side(flip, total), memo: p.memo, contactId: p.contactId, locationId: loc });
   const res = compact(out);
   assertBalanced(res);
   return res;
@@ -145,13 +154,16 @@ export function paymentJournal(p: { direction: 'RECEIPT' | 'DISBURSEMENT'; amoun
   return res;
 }
 
-/** Exact mirror image of a posted entry, for authorised reversals. */
-export function reverseLines(lines: { accountId: string; debit: Decimal.Value; credit: Decimal.Value; memo?: string | null; contactId?: string | null }[]): LineInput[] {
+/** Exact mirror image of a posted entry, for authorised reversals (tracking dimensions included). */
+export function reverseLines(lines: ({ accountId: string; debit: Decimal.Value; credit: Decimal.Value; memo?: string | null; contactId?: string | null } & Dims)[]): LineInput[] {
   return lines.map((l) => ({
     accountId: l.accountId,
     debit: D(l.credit).toFixed(2),
     credit: D(l.debit).toFixed(2),
     memo: l.memo ?? undefined,
     contactId: l.contactId,
+    classId: l.classId ?? null,
+    locationId: l.locationId ?? null,
+    projectId: l.projectId ?? null,
   }));
 }

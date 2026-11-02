@@ -7,8 +7,9 @@ import { PrismaService } from '../prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { LedgerService } from '../accounting/ledger.service';
 import { isoOf, toDate } from '../accounting/setup';
-import { documentPdf, type SalesDocument } from '@ca/reporting';
 import { BillingService, type RawLine } from './billing.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { SaasService } from '../saas/saas.service';
 
 type Tx = Prisma.TransactionClient;
 const D = (v: Decimal.Value | { toString(): string }) => new Decimal(v.toString());
@@ -17,18 +18,21 @@ const DAY = 86_400_000;
 export interface SalesReceiptInput {
   contactId: string; date: string; paymentMethod: 'CASH' | 'CHEQUE' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'E_TRANSFER' | 'OTHER';
   referenceNo?: string; depositAccountId: string; taxInclusive: boolean; lines: RawLine[];
-  billingAddress?: string; message?: string; memo?: string; post: boolean;
+  billingAddress?: string; message?: string; memo?: string; locationId?: string; post: boolean;
 }
-export interface ItemInput { name: string; sku?: string | null; type?: 'SERVICE' | 'NON_INVENTORY'; description?: string | null; rate?: string | null; incomeAccountId: string; taxCodeId?: string | null }
+export interface ItemInput {
+  name: string; sku?: string | null; type?: 'SERVICE' | 'NON_INVENTORY'; description?: string | null; rate?: string | null; incomeAccountId: string; taxCodeId?: string | null;
+  trackInventory?: boolean; inventoryAccountId?: string; cogsAccountId?: string; purchaseCost?: string | null; purchaseDescription?: string | null; reorderPoint?: string | null;
+}
 
 /** Sales receipts, products & services, and the combined "All sales" view with its money bar. */
 @Injectable()
 export class SalesService {
-  constructor(private readonly prisma: PrismaService, private readonly ledger: LedgerService, private readonly billing: BillingService, private readonly audit: AuditService) {}
+  constructor(private readonly prisma: PrismaService, private readonly ledger: LedgerService, private readonly billing: BillingService, private readonly audit: AuditService, private readonly inventory: InventoryService, private readonly saas: SaasService) {}
 
   // ================================================================ sales receipts
 
-  /** Money from a sales receipt goes straight into a bank or cash account (an active asset account that is not a control account). */
+  /** Money from a sales receipt goes into a bank or cash account, or Undeposited Funds (an active asset account that is not a control account). */
   private async checkDeposit(db: Tx | PrismaService, companyId: string, id: string) {
     const a = await db.account.findFirst({ where: { id, companyId } });
     if (!a || !a.isActive || a.type !== 'ASSET' || a.role) throw new BadRequestException({ code: 'INVALID_DEPOSIT_ACCOUNT', message: 'Deposit to must be an active bank or cash account' });
@@ -40,8 +44,10 @@ export class SalesService {
     await this.checkDeposit(tx, companyId, i.depositAccountId);
     const p = await this.billing.priceLines(tx, companyId, i.date, i.taxInclusive, i.lines);
     const extras = await this.billing.salesLineExtras(tx, companyId, i.lines);
+    await this.billing.checkDims(tx, companyId, [], i.locationId);
+    if (i.lines.some((l) => l.sourceRef)) throw new BadRequestException({ code: 'INVALID_BILLABLE', message: 'Billable time and costs go on invoices' });
     return {
-      contactId: i.contactId, date: toDate(i.date), paymentMethod: i.paymentMethod, referenceNo: i.referenceNo ?? null, depositAccountId: i.depositAccountId,
+      contactId: i.contactId, date: toDate(i.date), paymentMethod: i.paymentMethod, referenceNo: i.referenceNo ?? null, depositAccountId: i.depositAccountId, locationId: i.locationId ?? null,
       taxInclusive: i.taxInclusive, billingAddress: i.billingAddress ?? null, message: i.message ?? null, memo: i.memo ?? null,
       subtotal: p.subtotal, taxTotal: p.taxTotal, total: p.total,
       lines: { create: p.priced.map((l, n) => ({ ...l, ...extras[n], companyId })) },
@@ -84,8 +90,11 @@ export class SalesService {
       await this.checkDeposit(tx, companyId, r.depositAccountId);
       const roles = await this.ledger.roleAccounts(tx, companyId);
       const number = `SR-${String(await this.ledger.nextNumber(tx, companyId, 'sales_receipt')).padStart(4, '0')}`;
-      const lines = salesJournal({ lines: this.billing.docLines(r.lines), receivableId: r.depositAccountId, contactId: r.contactId, taxAccounts: roles.taxAccounts, memo: number });
+      const stock = await this.billing.saleInventory(tx, companyId, r.lines, false, r.contactId, number);
+      const lines = [...salesJournal({ lines: this.billing.docLines(r.lines), receivableId: r.depositAccountId, contactId: r.contactId, taxAccounts: roles.taxAccounts, memo: number, locationId: r.locationId }), ...stock.journal];
       const entry = await this.ledger.post(tx, { companyId, date: isoOf(r.date), memo: number, sourceType: 'sales_receipt', sourceId: r.id, lines, actorId, ip });
+      await this.inventory.commit(tx, companyId, stock.planned, { date: r.date, sourceType: 'sales_receipt', sourceId: r.id, journalEntryId: entry.id, actorId });
+      for (const p of stock.planned) await tx.salesReceiptLine.update({ where: { id: p.lineId! }, data: { cogs: p.value.abs().toFixed(2) } });
       const u = await tx.salesReceipt.update({ where: { id }, data: { number, status: 'PAID', journalEntryId: entry.id } });
       await this.audit.record({ action: 'sales_receipt.posted', companyId, actorId, entityType: 'SalesReceipt', entityId: id, metadata: { number, journal: entry.number }, ip }, tx);
       return u;
@@ -102,7 +111,9 @@ export class SalesService {
       const lineIds = (await tx.journalLine.findMany({ where: { entryId: r.journalEntryId! }, select: { id: true } })).map((l) => l.id);
       const matched = await tx.bankTransaction.findFirst({ where: { companyId, matchedLineId: { in: lineIds } } });
       if (matched) throw new ConflictException({ code: 'MATCHED', message: 'This receipt is matched to a bank transaction; unmatch it in Banking first' });
-      await this.ledger.reverse(companyId, r.journalEntryId!, actorId, { allowSourced: true, tx, memo: `Void ${r.number}` }, ip);
+      if (r.depositId) throw new ConflictException({ code: 'DEPOSITED', message: 'This receipt is part of a bank deposit; void the deposit first' });
+      const rev = await this.ledger.reverse(companyId, r.journalEntryId!, actorId, { allowSourced: true, tx, memo: `Void ${r.number}` }, ip);
+      await this.inventory.reverseSource(tx, companyId, 'sales_receipt', id, { date: isoOf(rev.date), journalEntryId: rev.id, actorId });
       const u = await tx.salesReceipt.update({ where: { id }, data: { status: 'VOID' } });
       await this.audit.record({ action: 'sales_receipt.voided', companyId, actorId, entityType: 'SalesReceipt', entityId: id, metadata: { number: r.number }, ip }, tx);
       return u;
@@ -125,15 +136,30 @@ export class SalesService {
     return this.prisma.item.findMany({ where: { companyId, ...(includeInactive ? {} : { isActive: true }) }, orderBy: { name: 'asc' }, include: { incomeAccount: { select: { code: true, name: true } }, taxCode: { select: { code: true, name: true } } } });
   }
 
-  private async checkItemRefs(companyId: string, i: { incomeAccountId?: string; taxCodeId?: string | null }) {
+  private async checkItemRefs(companyId: string, i: { incomeAccountId?: string; taxCodeId?: string | null; inventoryAccountId?: string; cogsAccountId?: string }) {
     if (i.incomeAccountId) await this.billing.checkAccounts(this.prisma, companyId, [i.incomeAccountId], ['REVENUE']);
+    if (i.inventoryAccountId) await this.billing.checkAccounts(this.prisma, companyId, [i.inventoryAccountId], ['ASSET']);
+    if (i.cogsAccountId) await this.billing.checkAccounts(this.prisma, companyId, [i.cogsAccountId], ['EXPENSE']);
     if (i.taxCodeId && !(await this.prisma.taxCode.findFirst({ where: { id: i.taxCodeId, companyId } }))) throw new BadRequestException({ code: 'INVALID_TAX_CODE', message: 'Unknown tax code' });
+  }
+
+  /** Inventory items need an asset and a COGS account. Default to 1200 Inventory and 5000 Cost of Goods Sold when present. */
+  private async inventoryDefaults(companyId: string, i: ItemInput) {
+    if (!i.trackInventory) return {};
+    const pick = async (id: string | undefined, code: string) => id ?? (await this.prisma.account.findFirst({ where: { companyId, code, isActive: true, role: null } }))?.id;
+    const inventoryAccountId = await pick(i.inventoryAccountId, '1200');
+    const cogsAccountId = await pick(i.cogsAccountId, '5000');
+    if (!inventoryAccountId || !cogsAccountId) throw new BadRequestException({ code: 'INVENTORY_ACCOUNTS', message: 'Inventory items need an inventory asset account and a cost of goods sold account' });
+    return { trackInventory: true, inventoryAccountId, cogsAccountId };
   }
 
   async createItem(companyId: string, i: ItemInput, actorId: string, ip: string | null) {
     await this.checkItemRefs(companyId, i);
     try {
-      const it = await this.prisma.item.create({ data: { companyId, name: i.name, sku: i.sku ?? null, type: i.type ?? 'SERVICE', description: i.description ?? null, rate: i.rate ?? null, incomeAccountId: i.incomeAccountId, taxCodeId: i.taxCodeId ?? null } });
+      if (i.trackInventory) await this.saas.assertFeature(companyId, 'inventory');
+      if (i.trackInventory && i.type === 'SERVICE') throw new BadRequestException({ code: 'INVALID_ITEM', message: 'Services cannot track quantity on hand' });
+      const inv = await this.inventoryDefaults(companyId, i);
+      const it = await this.prisma.item.create({ data: { companyId, name: i.name, sku: i.sku ?? null, type: i.trackInventory ? 'NON_INVENTORY' : i.type ?? 'SERVICE', description: i.description ?? null, rate: i.rate ?? null, incomeAccountId: i.incomeAccountId, taxCodeId: i.taxCodeId ?? null, purchaseCost: i.purchaseCost ?? null, purchaseDescription: i.purchaseDescription ?? null, reorderPoint: i.reorderPoint ?? null, ...inv } });
       await this.audit.record({ action: 'item.created', companyId, actorId, entityType: 'Item', entityId: it.id, metadata: { name: it.name }, ip });
       return it;
     } catch (e) {
@@ -146,6 +172,9 @@ export class SalesService {
     const cur = await this.prisma.item.findFirst({ where: { id, companyId } });
     if (!cur) throw new NotFoundException({ code: 'NOT_FOUND', message: 'Product or service not found' });
     await this.checkItemRefs(companyId, i);
+    // Turning tracking on or off, or moving the stock to other accounts, would leave the ledger and the stock records disagreeing.
+    if (i.trackInventory !== undefined && i.trackInventory !== cur.trackInventory) throw new BadRequestException({ code: 'INVENTORY_LOCKED', message: 'Quantity tracking is chosen when the product is created; create a new product instead' });
+    if (cur.trackInventory && ((i.inventoryAccountId && i.inventoryAccountId !== cur.inventoryAccountId) || (i.type && i.type !== cur.type)) && (await this.prisma.inventoryMovement.count({ where: { itemId: id } }))) throw new BadRequestException({ code: 'INVENTORY_LOCKED', message: 'This product already has stock movements; its inventory account cannot change' });
     try {
       const it = await this.prisma.item.update({ where: { id }, data: i });
       await this.audit.record({ action: 'item.updated', companyId, actorId, entityType: 'Item', entityId: id, metadata: i as Prisma.InputJsonObject, ip });
@@ -222,54 +251,5 @@ export class SalesService {
       out.set(r.contactId, (out.get(r.contactId) ?? D(0)).plus(r.kind === 'CREDIT' ? bal.neg() : bal));
     }
     return Object.fromEntries([...out].map(([k, v]) => [k, v.toFixed(2)]));
-  }
-
-  // ================================================================ printable documents
-
-  /** Customer-facing PDF of an invoice / credit note or a sales receipt. */
-  async documentPdf(companyId: string, type: 'invoice' | 'sales_receipt', id: string): Promise<{ filename: string; pdf: Buffer }> {
-    const company = await this.prisma.company.findUniqueOrThrow({ where: { id: companyId } });
-    const doc = type === 'invoice'
-      ? await this.prisma.invoice.findFirst({ where: { id, companyId }, include: { lines: { orderBy: { lineNo: 'asc' }, include: { taxCode: { select: { code: true } } } }, contact: true } })
-      : await this.prisma.salesReceipt.findFirst({ where: { id, companyId }, include: { lines: { orderBy: { lineNo: 'asc' }, include: { taxCode: { select: { code: true } } } }, contact: true } });
-    if (!doc) throw new NotFoundException({ code: 'NOT_FOUND', message: type === 'invoice' ? 'Invoice not found' : 'Sales receipt not found' });
-    const date = 'issueDate' in doc ? doc.issueDate : doc.date;
-    const regs = await this.prisma.taxRegistration.findMany({ where: { companyId, effectiveFrom: { lte: date }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: date } }] } });
-    const itemIds = [...new Set(doc.lines.map((l) => l.itemId).filter((x): x is string => !!x))];
-    const items = new Map((itemIds.length ? await this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, name: true } }) : []).map((i) => [i.id, i.name]));
-    // Tax shown by component and rate (e.g. "HST ON 13%"), as Canadian invoices are expected to show it.
-    const taxes = new Map<string, Decimal>();
-    for (const l of doc.lines) for (const t of l.taxDetail as { component: string; rate: string; amount: string }[]) {
-      const label = `${t.component} ${D(t.rate).times(100).toDecimalPlaces(3).toString()}%`;
-      taxes.set(label, (taxes.get(label) ?? D(0)).plus(t.amount));
-    }
-    const TERMS: Record<string, string> = { DUE_ON_RECEIPT: 'Due on receipt', NET_15: 'Net 15', NET_30: 'Net 30', NET_60: 'Net 60' };
-    const METHODS: Record<string, string> = { CASH: 'Cash', CHEQUE: 'Cheque', CREDIT_CARD: 'Credit card', DEBIT_CARD: 'Debit card', E_TRANSFER: 'Interac e-Transfer', OTHER: 'Other' };
-    const number = doc.number ?? 'DRAFT';
-    const base: Omit<SalesDocument, 'title' | 'details' | 'paid' | 'balanceDue'> = {
-      currency: doc.currency,
-      watermark: doc.status === 'DRAFT' ? 'DRAFT' : doc.status === 'VOID' ? 'VOID' : undefined,
-      company: {
-        name: company.operatingName || company.legalName, legalName: company.legalName, address: company.address, phone: company.phone, email: company.email,
-        registrations: regs.map((r) => `${r.kind === 'GST_HST' ? 'GST/HST' : r.kind === 'QST' ? 'QST' : 'PST'} registration no. ${r.registrationNumber}`),
-      },
-      number,
-      billTo: { name: doc.contact.name, address: doc.billingAddress ?? doc.contact.billingAddress, email: doc.contact.email },
-      lines: doc.lines.map((l) => ({ serviceDate: l.serviceDate ? isoOf(l.serviceDate) : null, product: l.itemId ? items.get(l.itemId) ?? null : null, description: l.description, quantity: D(l.quantity).toString(), rate: D(l.unitPrice).toFixed(2), amount: D(l.quantity).times(l.unitPrice).toFixed(2), taxCode: l.taxCode.code })),
-      subtotal: D(doc.subtotal).toFixed(2),
-      taxes: [...taxes].map(([label, amount]) => ({ label, amount: amount.toFixed(2) })),
-      total: D(doc.total).toFixed(2),
-      message: doc.message,
-    };
-    let full: SalesDocument;
-    if ('issueDate' in doc) {
-      const credit = doc.kind === 'CREDIT';
-      full = { ...base, title: credit ? 'CREDIT NOTE' : 'INVOICE', details: credit ? [['Date', isoOf(doc.issueDate)]] : [['Date', isoOf(doc.issueDate)], ['Due date', isoOf(doc.dueDate)], ...(doc.terms ? [['Terms', TERMS[doc.terms] ?? doc.terms] as [string, string]] : [])], ...(credit ? {} : { paid: D(doc.amountPaid).toFixed(2), balanceDue: doc.status === 'VOID' ? '0.00' : D(doc.total).minus(doc.amountPaid).toFixed(2) }) };
-    } else {
-      full = { ...base, title: 'SALES RECEIPT', details: [['Date', isoOf(doc.date)], ['Payment method', METHODS[doc.paymentMethod]], ...(doc.referenceNo ? [['Reference no.', doc.referenceNo] as [string, string]] : [])], paid: D(doc.total).toFixed(2) };
-    }
-    // Prices entered tax-included: lines show the pre-tax amount so subtotal + tax = total on the page.
-    if (doc.taxInclusive) full.lines = doc.lines.map((l, i) => ({ ...full.lines[i], rate: D(l.net).div(D(l.quantity).isZero() ? 1 : l.quantity).toFixed(2), amount: D(l.net).toFixed(2) }));
-    return { filename: `${full.title === 'SALES RECEIPT' ? 'sales-receipt' : full.title === 'CREDIT NOTE' ? 'credit-note' : 'invoice'}-${number}.pdf`, pdf: await documentPdf(full) };
   }
 }
